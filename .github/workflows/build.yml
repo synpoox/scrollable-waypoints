@@ -1,7 +1,8 @@
 # Builds scrollable-waypoints.dll on Windows (MSVC, x64, Release) and uploads it as an artifact.
 # Download it from the run's page: Actions tab -> the run -> "Artifacts" -> scrollable-waypoints-dll.
-# A pushed tag v<version> (matching PluginVersion in plugin/src/plugin.cpp) also publishes a GitHub Release with the
-# DLL, its SHA-256 and that version's CHANGELOG.md section.
+# Publishing a release (DLL, its SHA-256 and that version's CHANGELOG.md section), either way:
+#  - Actions tab -> Build DLL -> Run workflow on main, with "publish" ticked: tags v<PluginVersion> and releases it;
+#  - or push a tag v<version> matching PluginVersion in plugin/src/plugin.cpp.
 name: Build DLL
 
 on:
@@ -10,6 +11,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a release: tag v<PluginVersion> on this commit (run it on main)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,7 +58,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     needs: [logic-tests, build]
     runs-on: ubuntu-latest
     permissions:
@@ -60,12 +66,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check the tag matches the plugin version
+      - name: Work out the version and tag
+        id: version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           version=$(sed -n 's/.*PluginVersion = "\([^"]*\)".*/\1/p' plugin/src/plugin.cpp)
-          echo "tag $tag, plugin $version"
-          [ "$tag" = "$version" ] || { echo "::error::tag v$tag does not match PluginVersion $version"; exit 1; }
+          [ -n "$version" ] || { echo "::error::PluginVersion not found in plugin/src/plugin.cpp"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            [ "${GITHUB_REF_NAME#v}" = "$version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match PluginVersion $version"; exit 1; }
+          else
+            [ "$GITHUB_REF_NAME" = "main" ] || { echo "::error::publish releases from main, not $GITHUB_REF_NAME"; exit 1; }
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
         with:
@@ -75,13 +87,18 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::release $TAG already exists: bump PluginVersion and add a CHANGELOG.md section first"; exit 1
+          fi
           cd dist
           sha256sum scrollable-waypoints.dll > scrollable-waypoints.dll.sha256
           # this version's CHANGELOG section (from its heading to the next one)
-          awk -v v="## $version" '$0 == v {on=1; next} /^## / {on=0} on' ../CHANGELOG.md > notes.md
-          [ -s notes.md ] || { echo "::error::CHANGELOG.md has no '## $version' section"; exit 1; }
+          awk -v v="## $VERSION" '$0 == v {on=1; next} /^## / {on=0} on' ../CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::CHANGELOG.md has no '## $VERSION' section"; exit 1; }
           printf '\n**Install:** close the game, copy `scrollable-waypoints.dll` into `<game folder>\\d2rloader\\plugins\\`, start the game through D2RLoader. Built on D2R 3.3.0 build 93847 with D2RLoader 1.3.1.\n' >> notes.md
-          gh release create "$GITHUB_REF_NAME" scrollable-waypoints.dll scrollable-waypoints.dll.sha256 \
-            --repo "$GITHUB_REPOSITORY" --title "Scrollable Waypoints $version" --notes-file notes.md
+          # --target: when the tag does not exist yet (Run workflow), it is created on the commit that was built
+          gh release create "$TAG" scrollable-waypoints.dll scrollable-waypoints.dll.sha256 --target "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --title "Scrollable Waypoints $VERSION" --notes-file notes.md
