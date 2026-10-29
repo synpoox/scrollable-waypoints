@@ -54,6 +54,8 @@ jobs:
             Write-Output "::error title=dump-game.ps1::$flat"
             exit 1
           }
+          Write-Output "::notice title=dump-game.ps1::compiled and reached the process check"
+          exit 0  # the runner would otherwise exit with the script's expected exit code 1
 
       - name: Upload DLL
         uses: actions/upload-artifact@v4
