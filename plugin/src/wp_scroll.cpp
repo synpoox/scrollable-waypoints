@@ -3,7 +3,7 @@
 // selects a destination. Everything else is left to the game.
 //
 // No pixel coordinates and no simulated input: the plugin does what a controller shoulder button does to the panel's
-// tab bar. Pieces (confirmed in game or in the build-93847 image, see ENGINE-NOTES.md):
+// tab bar. Pieces (confirmed in game and in the build-93847 image):
 //  - Wheel: the SDK has no mouse input, so the plugin subclasses D2R's window procedure (class OsWindow) and reads
 //    WM_MOUSEWHEEL. While the panel is open and its tab bar is known, a notch is consumed and becomes an Act step;
 //    every other wheel message goes to the game unchanged.

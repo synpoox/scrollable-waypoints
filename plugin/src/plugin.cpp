@@ -3,8 +3,7 @@
 // Target: D2R 3.3 under D2RLoader 1.3.1, PluginSDK 0.3.0. Client-only (UI behaviour, nothing shared with other
 // players), global (installed in <game>/d2rloader/plugins/, runs with or without a mod; not ModScopedOnly, which makes
 // D2RLoader refuse it in the global folder). It patches no game code except one checked hook on the tab bar's
-// SetActiveTab (build 93847 only; on any other image it stays off and only watches). See wp_scroll.cpp and
-// ENGINE-NOTES.md.
+// SetActiveTab (build 93847 only; on any other image it stays off and only watches). See wp_scroll.cpp.
 //
 // Console command "scrollable-waypoints" prints the live state (window, panel, tab bar, wheel and switch counters).
 #include <D2RLPlugin/api.h>

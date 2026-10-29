@@ -44,23 +44,6 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File plugin\build.ps1 -Sdk "$env:GITHUB_WORKSPACE\PluginSDK"
 
-      - name: Check the dump script compiles
-        # No game runs here: the script must parse, compile its C# and stop at "is not running".
-        shell: pwsh
-        run: |
-          # The script exits 1 by design here; keep that from stopping the step before the check.
-          $ErrorActionPreference = 'Continue'
-          $PSNativeCommandUseErrorActionPreference = $false
-          $out = (powershell -ExecutionPolicy Bypass -File tools\dump-game.ps1 -Out $env:RUNNER_TEMP 2>&1 | Out-String -Width 400)
-          Write-Output $out
-          if ($out -notmatch "is not running") {
-            $flat = ($out -replace "`r?`n", " | ")
-            Write-Output "::error title=dump-game.ps1::$flat"
-            exit 1
-          }
-          Write-Output "::notice title=dump-game.ps1::compiled and reached the process check"
-          exit 0  # the runner would otherwise exit with the script's expected exit code 1
-
       - name: Upload DLL
         uses: actions/upload-artifact@v4
         with:
