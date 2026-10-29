@@ -42,11 +42,14 @@ Third-party code: see NOTICE.md.
 
 Logic tests (any OS): `g++ -std=c++20 -Iplugin/src plugin/tests/wp_logic_test.cpp -o wp_test && ./wp_test`
 
-## First use: click one Act tab
+## Status
 
-The first time you open a waypoint at a given window size, **click any Act tab once by hand**. That click shows the
-plugin where the tabs really are on your screen. Until then the wheel goes to the game as usual. The confirmed size
-is saved in `scrollable-waypoints-calibration.txt` next to the DLL. Delete that file to redo it.
+Work in progress. The wheel and the waypoint panel are detected (confirmed in game), but **switching Acts isn't
+wired in yet**. In this build the wheel always goes to the game unchanged.
+
+Switching will use the Act tab bar's own previous/next, the same thing a controller's shoulder buttons use. It is
+called directly in the game, with no pixel coordinates and no simulated clicks. That needs the function's address in
+D2R 3.3 build 93847, found from a memory dump of the running game (`tools/dump-game.ps1`).
 
 ## How it works
 
@@ -56,20 +59,7 @@ is saved in `scrollable-waypoints-calibration.txt` next to the DLL. Delete that 
 |---|---|
 | Wheel | Subclass of D2R's window procedure (`WM_MOUSEWHEEL`, confirmed in game). The SDK has no mouse input |
 | Panel open? | UI messages `PanelManager:OpenPanel` / `ClosePanel` with `WaypointsPanelExpansion` (or `WaypointsPanelOriginal` for Classic characters, 4 Acts) |
-| Cursor over the panel | Panel rectangle computed from the layout (`$LeftPanelRect`, `$LeftPanelAnchor`) and the window size |
 | Act shown on open | Lifecycle `ActChanged` (the panel opens on the player's Act) |
-| Act shown after that | Your tab clicks (the tab under the cursor) and the plugin's own clicks |
-| Switch Act | A click on the tab's centre. The tabs are one `TabBarWidget` whose message `Waypoints:SelectTab` has no tab number, so no message can ask for "Act N". The cursor is put back right after |
+| Switch Act | **Pending:** the `TabBarWidget`'s native previous/next. Its message `Waypoints:SelectTab` has no tab number, so no UI message can select an Act |
 
-Safety:
-- The plugin clicks only at a window size that one of your own tab clicks has confirmed.
-- It clicks the middle of the tab, 28 layout units above the destination buttons.
-- It doesn't click while a mouse button is held.
-- A tab that doesn't respond (an Act not reached yet) is skipped until the panel closes.
-- It never consumes a UI message and patches no game code.
-
-## Known limits
-
-- A real tab click per window size is needed once (see above).
-- A layout mod that moves the waypoint tabs needs a plugin update. Reimagined uses the vanilla positions.
-- The cursor jumps to the tab for one or two frames while the plugin clicks.
+It never consumes a UI message.

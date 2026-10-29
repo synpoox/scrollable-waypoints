@@ -1,2 +1,5 @@
 plugin/build/
 out/
+# memory dumps of the game: Blizzard code, never commit
+*_dump.exe
+*_dump.zip
