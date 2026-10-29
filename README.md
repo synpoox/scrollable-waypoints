@@ -42,31 +42,34 @@ Third-party code: see NOTICE.md.
 
 Logic tests (any OS): `g++ -std=c++20 -Iplugin/src plugin/tests/wp_logic_test.cpp -o wp_test && ./wp_test`
 
+## First use: click one Act tab
+
+The first time you open a waypoint at a given window size, **click any Act tab once by hand**. That click shows the
+plugin where the tabs really are on your screen. Until then the wheel goes to the game as usual. The confirmed size
+is saved in `scrollable-waypoints-calibration.txt` next to the DLL. Delete that file to redo it.
+
 ## How it works
 
 `plugin/src/wp_scroll.cpp` explains it in full. In short:
 
 | Need | Source |
 |---|---|
-| Wheel | Subclass of D2R's window procedure (`WM_MOUSEWHEEL`). The SDK has no mouse input |
-| Panel open? | Per-frame UI tick: the panel resolves through `WidgetService::findPanel` / `getWidgetRect` |
-| Cursor over the panel | Left half of the client area (the waypoint panel is a left-side panel) |
+| Wheel | Subclass of D2R's window procedure (`WM_MOUSEWHEEL`, confirmed in game). The SDK has no mouse input |
+| Panel open? | UI messages `PanelManager:OpenPanel` / `ClosePanel` with `WaypointsPanelExpansion` (or `WaypointsPanelOriginal` for Classic characters, 4 Acts) |
+| Cursor over the panel | Panel rectangle computed from the layout (`$LeftPanelRect`, `$LeftPanelAnchor`) and the window size |
 | Act shown on open | Lifecycle `ActChanged` (the panel opens on the player's Act) |
-| Act shown after that | UI message listener follows every waypoint tab message, yours and the plugin's |
-| Switch Act | `WidgetService::dispatchUiAction` with the panel's tab message. Only a command containing "Tab" is ever sent |
+| Act shown after that | Your tab clicks (the tab under the cursor) and the plugin's own clicks |
+| Switch Act | A click on the tab's centre. The tabs are one `TabBarWidget` whose message `Waypoints:SelectTab` has no tab number, so no message can ask for "Act N". The cursor is put back right after |
 
-The plugin patches no game code and uses no game address, so it has no image check. It never consumes a UI message.
+Safety:
+- The plugin clicks only at a window size that one of your own tab clicks has confirmed.
+- It clicks the middle of the tab, 28 layout units above the destination buttons.
+- It doesn't click while a mouse button is held.
+- A tab that doesn't respond (an Act not reached yet) is skipped until the panel closes.
+- It never consumes a UI message and patches no game code.
 
-## Not verified yet
+## Known limits
 
-No game files and no game run were available when this was written. See TESTING.md.
-
-- The panel's root name (candidates: `WaypointsPanel`, `WaypointPanel`, `WaypointsPanelHD`, `Waypoints`).
-- The tab message. The default is `WaypointsPanelMessage:ActivateTab:<0-4>`, by analogy with the skill tree. One
-  click on an Act tab teaches the plugin the real message, and the log records it.
-- That `findPanel` stops resolving while the panel is closed.
-- That D2R gets the wheel as `WM_MOUSEWHEEL`, not only as raw input.
-- What happens on a locked Act (one not reached yet, or Act V on a Classic character). The plugin cycles all five
-  Acts, as specified.
-
-Once the first test session confirms the names, they get hard-coded and the guesses go away.
+- A real tab click per window size is needed once (see above).
+- A layout mod that moves the waypoint tabs needs a plugin update. Reimagined uses the vanilla positions.
+- The cursor jumps to the tab for one or two frames while the plugin clicks.
