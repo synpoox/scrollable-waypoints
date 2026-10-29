@@ -320,12 +320,30 @@ void ApplyPendingSteps() noexcept {
 
 void __cdecl Tick(const D2RL::PluginContext* context, void* userData) noexcept;
 
-void QueueTick() noexcept {
+// Queues the next tick. False when the loader refuses; the tick then stays stopped until StartTick succeeds.
+auto QueueTick() noexcept -> bool {
 	const D2RL::Threads::Result r = g_threads->runOnUiThread(g_ctx, Tick, nullptr);
-	g_tickRunning = r == D2RL::Threads::Result::Success;
-	if (!g_tickRunning) {
-		plog::Error("UI tick could not be queued (result %u): waypoint scroll stopped", static_cast<unsigned>(r));
-		g_open = false;
+	if (r == D2RL::Threads::Result::Success) {
+		return true;
+	}
+	g_tickRunning = false;
+	g_open = false;
+	static std::atomic<uint32_t> s_refused{0};
+	if (plog::Sample(s_refused)) {
+		plog::Warn("UI tick not queued (result %u, %u so far); retried on the next UI event", static_cast<unsigned>(r), s_refused.load());
+	}
+	return false;
+}
+
+// Starts the per-frame tick unless it runs already. D2RLoader refuses runOnUiThread while the plugin is still loading
+// (OwnerInactive, seen with D2RLoader 1.3.1), so this is called from every later callback (UI messages, gameplay
+// events) until it succeeds.
+void StartTick() noexcept {
+	if (!g_active.load() || g_tickRunning.exchange(true)) {
+		return;
+	}
+	if (QueueTick()) {
+		plog::Info("UI tick started");
 	}
 }
 
@@ -345,7 +363,7 @@ void __cdecl Tick(const D2RL::PluginContext* context, void* userData) noexcept {
 	}
 	PollPanel();
 	ApplyPendingSteps();
-	QueueTick();  // runs again on the next UI update
+	(void)QueueTick();  // runs again on the next UI update
 }
 
 // --- Listeners -------------------------------------------------------------------------------------------------------
@@ -358,6 +376,7 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext* context, const D2RL::SharedE
 	if (event == nullptr || event->structSize < D2RL::SharedEvents::UiMessageEventRequiredSize || !g_active.load()) {
 		return Continue;
 	}
+	StartTick();
 	const char* target = event->target != nullptr ? event->target : "";
 	const char* command = event->command != nullptr ? event->command : "";
 	const char* text = event->text != nullptr ? event->text : "";
@@ -409,13 +428,18 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext* context, const D2RL::SharedE
 	return Continue;
 }
 
-void __cdecl OnActChanged(const D2RL::PluginContext* context, const D2RL::Lifecycle::GameplayEvent* event, void* userData) noexcept {
+void __cdecl OnGameplayEvent(const D2RL::PluginContext* context, const D2RL::Lifecycle::GameplayEvent* event, void* userData) noexcept {
 	(void)context;
 	(void)userData;
 	if (event == nullptr || !D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) {
 		return;
 	}
-	g_playerAct = event->kind == D2RL::Lifecycle::GameplayEventKind::GameLeft ? -1 : event->currentValue;
+	StartTick();
+	if (event->kind == D2RL::Lifecycle::GameplayEventKind::ActChanged) {
+		g_playerAct = event->currentValue;
+	} else if (event->kind == D2RL::Lifecycle::GameplayEventKind::GameLeft) {
+		g_playerAct = -1;
+	}
 }
 
 template <typename Service>
@@ -464,13 +488,14 @@ auto InstallScrollableWaypoints(const D2RL::PluginContext* context, char* report
 		std::snprintf(report, reportSize, "off: UI message listener refused");
 		return false;
 	}
-	for (const auto kind : {D2RL::Lifecycle::GameplayEventKind::ActChanged, D2RL::Lifecycle::GameplayEventKind::GameLeft}) {
+	for (const auto kind : {D2RL::Lifecycle::GameplayEventKind::ActChanged, D2RL::Lifecycle::GameplayEventKind::GameLeft,
+	                        D2RL::Lifecycle::GameplayEventKind::GameJoined, D2RL::Lifecycle::GameplayEventKind::LocalPlayerReady}) {
 		const D2RL::Lifecycle::GameplayEventListener listener{
 			.structSize = D2RL::Lifecycle::GameplayEventListenerSize,
 			.flags = 0,
 			.kind = kind,
 			.reserved = 0,
-			.callback = OnActChanged,
+			.callback = OnGameplayEvent,
 			.userData = nullptr,
 		};
 		D2RL::Lifecycle::ListenerHandle handle = D2RL::Lifecycle::InvalidHandle;
@@ -481,12 +506,7 @@ auto InstallScrollableWaypoints(const D2RL::PluginContext* context, char* report
 	}
 
 	g_active = true;
-	QueueTick();
-	if (!g_tickRunning.load()) {
-		g_active = false;
-		std::snprintf(report, reportSize, "off: UI tick could not be queued");
-		return false;
-	}
+	StartTick();  // usually refused while loading; the listeners start it on the first UI event
 	std::snprintf(report, reportSize, "on: wheel over the open waypoint panel switches Acts (tab message %s:%s, default)",
 	              DefaultTabTarget, DefaultTabCommand);
 	return true;
@@ -500,7 +520,7 @@ void ScrollableWaypointsStatus(char* out, size_t size) noexcept {
 	std::snprintf(out, size,
 	              "%s | window %s | panel %s, %s (opened %u) | Act shown %d, player %d | tab %s:%s:<n> from %d (%s) | "
 	              "wheel %u seen, %u used, raw %u | switches %u, failed %u | tab messages %u",
-	              g_active.load() ? (g_tickRunning.load() ? "on" : "on, TICK STOPPED") : "off",
+	              g_active.load() ? (g_tickRunning.load() ? "on" : "on, tick waiting for a UI event") : "off",
 	              g_hwnd != nullptr ? "hooked" : "not found yet", g_panelName >= 0 ? PanelNames[g_panelName] : "not found yet",
 	              g_open.load() ? "open" : "closed", g_opens.load(), g_shownAct.load() + 1, g_playerAct.load() + 1, m.target,
 	              m.command, m.base, learned ? "learned" : "default", g_wheelSeen.load(), g_wheelUsed.load(), g_rawWheel.load(),
