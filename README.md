@@ -42,24 +42,21 @@ Third-party code: see NOTICE.md.
 
 Logic tests (any OS): `g++ -std=c++20 -Iplugin/src plugin/tests/wp_logic_test.cpp -o wp_test && ./wp_test`
 
-## Status
-
-Work in progress. The wheel and the waypoint panel are detected (confirmed in game), but **switching Acts isn't
-wired in yet**. In this build the wheel always goes to the game unchanged.
-
-Switching will use the Act tab bar's own previous/next, the same thing a controller's shoulder buttons use. It is
-called directly in the game, with no pixel coordinates and no simulated clicks. That needs the function's address in
-D2R 3.3 build 93847, found from a memory dump of the running game (`tools/dump-game.ps1`).
-
 ## How it works
 
-`plugin/src/wp_scroll.cpp` explains it in full. In short:
+While the waypoint panel is open, the wheel does to the Act tabs exactly what a controller's shoulder buttons do.
+The plugin calls the tab bar's own code. It uses no pixel coordinates and no simulated clicks, and the cursor never
+moves.
 
 | Need | Source |
 |---|---|
-| Wheel | Subclass of D2R's window procedure (`WM_MOUSEWHEEL`, confirmed in game). The SDK has no mouse input |
-| Panel open? | UI messages `PanelManager:OpenPanel` / `ClosePanel` with `WaypointsPanelExpansion` (or `WaypointsPanelOriginal` for Classic characters, 4 Acts) |
-| Act shown on open | Lifecycle `ActChanged` (the panel opens on the player's Act) |
-| Switch Act | **Pending:** the `TabBarWidget`'s native previous/next. Its message `Waypoints:SelectTab` has no tab number, so no UI message can select an Act |
+| Wheel | Subclass of D2R's window procedure (`WM_MOUSEWHEEL`). The SDK has no mouse input |
+| Panel open? | UI messages `PanelManager:OpenPanel` / `ClosePanel` with `WaypointsPanelExpansion` (or `WaypointsPanelOriginal`: Classic characters, 4 Acts) |
+| The panel's tab bar | A hook on `TabBarWidget::SetActiveTab`. When the panel shows an Act, it calls that function from one known place, and the plugin takes that tab bar |
+| Switch Act | The tab bar's controller logic: previous/next with wrap-around, `FindAvailableTab` (skips Acts not reached yet), then `SetActiveTab` with the tab sound. The panel then shows that Act, just as after a click |
 
-It never consumes a UI message.
+The engine addresses are for D2R 3.3 build 93847 (image `0x6ab3782c`) only, and the entry bytes are checked. On any
+other build the plugin installs no hook and the wheel always goes to the game. See `ENGINE-NOTES.md`, and
+`tools/dump-game.ps1` for redoing the addresses after an update.
+
+The plugin never consumes a UI message.

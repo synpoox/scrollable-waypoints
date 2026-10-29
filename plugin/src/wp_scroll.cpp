@@ -2,18 +2,26 @@
 // (wheel down) or previous (wheel up) Act tab, wrapping at both ends. Scrolling only changes the tab; it never
 // selects a destination. Everything else is left to the game.
 //
-// No pixel coordinates, no simulated clicks. The pieces (names confirmed in game with D2R 3.3 + Reimagined):
+// No pixel coordinates and no simulated input: the plugin does what a controller shoulder button does to the panel's
+// tab bar. Pieces (confirmed in game or in the build-93847 image, see knowledge.md):
 //  - Wheel: the SDK has no mouse input, so the plugin subclasses D2R's window procedure (class OsWindow) and reads
-//    WM_MOUSEWHEEL (confirmed).
+//    WM_MOUSEWHEEL. While the panel is open and its tab bar is known, a notch is consumed and becomes an Act step;
+//    every other wheel message goes to the game unchanged.
 //  - Panel open/closed: UI messages PanelManager:OpenPanel / ClosePanel / UnloadPanel with WaypointsPanelExpansion
-//    (5 Acts) or WaypointsPanelOriginal (Classic characters, 4 Acts); PanelManager:UnloadAll and front-end
-//    navigation close it too (confirmed).
-//  - Switching: the Act tabs are one TabBarWidget ("Tabs") whose message, Waypoints:SelectTab, carries no tab number,
-//    so no UI message can select an Act. The plan is the tab bar's own previous/next (what controller shoulder
-//    buttons use), called natively once its address in build 93847 is known. Until then SwitchActs() only logs and
-//    the wheel goes to the game unchanged.
+//    (5 Acts) or WaypointsPanelOriginal (Classic characters, 4 Acts); PanelManager:UnloadAll, front-end navigation.
+//  - The panel's tab bar: a TabBarWidget ("Tabs", kept at WaypointsPanel+0x170). When the panel shows an Act
+//    (0x1ec820, on every open) it marks which Acts are available and calls TabBarWidget::SetActiveTab from one place
+//    (returning to 0x1ec8d3). A hook on SetActiveTab takes the tab bar of that call: only the waypoint panel makes it.
+//    It is dropped when panels are unloaded and only used while the panel is open.
+//  - Switching: the tab bar's own controller code (its input handler at 0x878ed3): previous = current - 1 (from the
+//    first tab: the last), next = current + 1 (from the last: the first), then FindAvailableTab skips tabs that are
+//    not available (Acts not reached yet), then SetActiveTab(index, sound on) selects it and sends the message, so the
+//    panel shows that Act exactly as after a click or a shoulder button.
+//  - Engine addresses are build 93847 only (image 0x6ab3782c); entry bytes are checked. On any other image the
+//    hook is not installed, nothing native is called and the wheel is never consumed.
 #include "wp_scroll.h"
 
+#include "build_guard.h"
 #include "log.h"
 #include "wp_logic.h"
 
@@ -28,28 +36,62 @@
 
 #include <atomic>
 #include <cstdint>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#define RETURN_ADDRESS() _ReturnAddress()
+#else
+#define RETURN_ADDRESS() __builtin_return_address(0)
+#endif
 #include <cstdio>
 #include <cstring>
 
 namespace {
 
-constexpr uint32_t MaxLoggedMessages = 300;  // UI-message diagnosis lines per load (the log must stay readable)
-constexpr uint32_t MaxLoggedWheel = 20;      // wheel events logged one by one (then only the counters)
+constexpr uint32_t MaxLoggedMessages = 60;  // UI-message diagnosis lines per load (the log must stay readable)
+constexpr uint32_t MaxLoggedWheel = 10;     // wheel events logged one by one (then only the counters)
+
+// --- Engine (D2R 3.3 build 93847, image 0x6ab3782c) ------------------------------------------------------------------
+
+// void TabBarWidget::SetActiveTab(this, int index, bool playSound): sets the tab (re-checking availability), plays the
+// tab sound when asked, sends onSwitchTabMessage.
+constexpr uint64_t SetActiveTabRva = 0x878fb0;
+// MOV [RSP+0x18],RBX / MOV [RSP+0x10],EDX / PUSH RBP / PUSH RSI / PUSH RDI / SUB RSP,0x30: 16 bytes, 6 instructions.
+constexpr uint8_t SetActiveTabEntry[] = {0x48, 0x89, 0x5c, 0x24, 0x18, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x57, 0x48, 0x83, 0xec, 0x30};
+// int TabBarWidget::FindAvailableTab(this, int index, bool forward): `index` if available, else the nearest available
+// tab in that direction (wrapping).
+constexpr uint64_t FindAvailableTabRva = 0x877d20;
+constexpr uint8_t FindAvailableTabEntry[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x4c, 0x63, 0xda, 0x48, 0x8b, 0xd9,
+                                             0x41, 0x80, 0xbc, 0x0b, 0x88, 0x17, 0x00, 0x00, 0x00};
+// Return address of WaypointsPanel's own SetActiveTab call (in its show-Act routine 0x1ec820).
+constexpr uint64_t PanelSetActiveTabReturnRva = 0x1ec8d3;
+// TabBarWidget fields (reflection table at 0x2536000).
+constexpr size_t TabCountOffset = 0x558;          // int tabCount
+constexpr size_t ActiveTabOffset = 0x16c4;        // int active tab, -1 none
+
+using SetActiveTabFn = void (*)(void* tabBar, int32_t index, bool playSound) noexcept;
+using FindAvailableTabFn = int32_t (*)(void* tabBar, int32_t index, bool forward) noexcept;
+
+SetActiveTabFn g_setActiveTab = nullptr;  // trampoline to the original (set by the hook)
+FindAvailableTabFn g_findAvailableTab = nullptr;
+bool g_engineOk = false;
+
+// --- State -----------------------------------------------------------------------------------------------------------
 
 const D2RL::PluginContext* g_ctx = nullptr;
-const D2RL::WidgetService* g_widgets = nullptr;
 const D2RL::ThreadService* g_threads = nullptr;
 
 enum class Variant : int { None = 0, Expansion = 1, Original = 2 };
 
-std::atomic<bool> g_active{false};     // installed and not unloading
-std::atomic<bool> g_open{false};       // waypoint panel open (UI messages), read by the window procedure
-std::atomic<int> g_variant{0};         // Variant of the open panel
-std::atomic<int> g_pendingSteps{0};    // Act steps from the wheel, applied by the next UI tick
-std::atomic<int> g_shownAct{0};        // 0-based Act the panel shows
-std::atomic<int> g_playerAct{-1};      // 0-based Act the player is in (-1 unknown)
+std::atomic<bool> g_active{false};    // installed and not unloading
+std::atomic<bool> g_open{false};      // waypoint panel open (UI messages)
+std::atomic<int> g_variant{0};        // Variant of the open panel
+std::atomic<int> g_pendingSteps{0};   // Act steps from the wheel, applied by the next UI tick
 std::atomic<bool> g_tickRunning{false};
-std::atomic<uint64_t> g_ticks{0};
+
+// The waypoint panel's tab bar, taken by the SetActiveTab hook (UI thread; the window procedure reads whether it is
+// known). Used only while the panel is open; dropped when panels are unloaded.
+std::atomic<void*> g_tabBar{nullptr};
+uintptr_t g_panelCallSite = 0;        // exeBase + PanelSetActiveTabReturnRva
 
 // Window subclass. g_hwnd is set by the UI tick; the window procedure reads g_prevProc.
 std::atomic<HWND> g_hwnd{nullptr};
@@ -58,28 +100,17 @@ bool g_pinned = false;
 wp::WheelAccumulator g_wheel;  // window-procedure thread only
 
 // Counters for the status command.
-std::atomic<uint32_t> g_wheelSeen{0}, g_wheelUsed{0}, g_tabMessages{0};
+std::atomic<uint32_t> g_wheelSeen{0}, g_wheelUsed{0}, g_switches{0}, g_tabMessages{0};
 std::atomic<uint32_t> g_loggedMessages{0}, g_opens{0}, g_loggedWheel{0};
-
-auto TabCount(Variant v) noexcept -> int {
-	return v == Variant::Original ? 4 : wp::MaxActs;  // Classic characters' panel has Acts I-IV
-}
-
-auto ClientSize(HWND hwnd, int* width, int* height) noexcept -> bool {
-	RECT rc{};
-	if (hwnd == nullptr || !GetClientRect(hwnd, &rc) || rc.right <= 0 || rc.bottom <= 0) {
-		return false;
-	}
-	*width = rc.right;
-	*height = rc.bottom;
-	return true;
-}
 
 auto VariantName(Variant v) noexcept -> const char* {
 	return v == Variant::Original ? "WaypointsPanelOriginal" : v == Variant::Expansion ? "WaypointsPanelExpansion" : "none";
 }
 
-// --- Window procedure ------------------------------------------------------------------------------------------------
+template <typename T>
+auto Field(void* object, size_t offset) noexcept -> T& {
+	return *reinterpret_cast<T*>(static_cast<uint8_t*>(object) + offset);
+}
 
 void LogStatus(const char* why) noexcept {
 	char state[700];
@@ -87,25 +118,77 @@ void LogStatus(const char* why) noexcept {
 	plog::Info("status (%s): %s", why, state);
 }
 
-auto WheelIsOurs(const char** why) noexcept -> bool {
-	if (!g_open.load()) {
-		*why = "panel closed";
-		return false;
+// --- SetActiveTab hook: finds the waypoint panel's tab bar -------------------------------------------------------------
+
+void SetActiveTabHook(void* tabBar, int32_t index, bool playSound) noexcept {
+	const auto caller = reinterpret_cast<uintptr_t>(RETURN_ADDRESS());
+	g_setActiveTab(tabBar, index, playSound);
+	if (caller != g_panelCallSite || !g_active.load()) {
+		return;
 	}
-	*why = "panel open";
-	return true;
+	// The waypoint panel just showed an Act: this is its tab bar.
+	const int count = Field<int32_t>(tabBar, TabCountOffset);
+	if (count < 1 || count > wp::MaxActs) {
+		plog::Warn("waypoint tab bar %p has %d tabs: not used", tabBar, count);
+		return;
+	}
+	if (g_tabBar.exchange(tabBar) != tabBar) {
+		plog::Info("waypoint tab bar %p (%d tabs, Act %d shown): scrolling on", tabBar, count, Field<int32_t>(tabBar, ActiveTabOffset) + 1);
+	}
 }
+
+// --- Switching (UI tick) -----------------------------------------------------------------------------------------------
+
+// One controller-style step on the panel's tab bar: what its input handler does for tabLeft / tabRight.
+void StepTab(void* tabBar, bool forward) noexcept {
+	const int32_t count = Field<int32_t>(tabBar, TabCountOffset);
+	const int32_t current = Field<int32_t>(tabBar, ActiveTabOffset);
+	if (count < 1 || count > wp::MaxActs || current < -1 || current >= count) {
+		plog::Warn("tab bar %p looks wrong (%d tabs, active %d): scrolling off until the panel shows an Act again", tabBar, count, current);
+		g_tabBar = nullptr;
+		return;
+	}
+	int32_t index = 0;
+	if (forward) {
+		index = current >= count - 1 ? 0 : current + 1;
+	} else {
+		index = (current <= 0 ? count : current) - 1;
+	}
+	index = g_findAvailableTab(tabBar, index, forward);
+	g_setActiveTab(tabBar, index, true);
+	++g_switches;
+}
+
+void ApplyPendingSteps() noexcept {
+	int steps = g_pendingSteps.exchange(0);
+	void* const tabBar = g_tabBar.load();
+	if (steps == 0 || !g_open.load() || tabBar == nullptr) {
+		return;
+	}
+	const int count = Field<int32_t>(tabBar, TabCountOffset);
+	if (count > 0) {
+		steps %= count;  // a fast spin never goes round more than once
+	}
+	for (; steps > 0 && g_tabBar.load() != nullptr; --steps) {
+		StepTab(tabBar, true);
+	}
+	for (; steps < 0 && g_tabBar.load() != nullptr; ++steps) {
+		StepTab(tabBar, false);
+	}
+}
+
+// --- Window procedure --------------------------------------------------------------------------------------------------
 
 auto CALLBACK WheelWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
 	const WNDPROC prev = g_prevProc.load();
 	if (g_active.load() && msg == WM_MOUSEWHEEL) {
 		++g_wheelSeen;
-		const char* why = "";
-		const bool ours = WheelIsOurs(&why);
+		const bool open = g_open.load();
+		const bool ours = open && g_engineOk && g_tabBar.load() != nullptr;
 		if (g_loggedWheel.load() < MaxLoggedWheel) {
 			++g_loggedWheel;
-			plog::Info("wheel delta %d at screen %d,%d: %s", static_cast<int>(GET_WHEEL_DELTA_WPARAM(wParam)),
-			           static_cast<int>(GET_X_LPARAM(lParam)), static_cast<int>(GET_Y_LPARAM(lParam)), why);
+			plog::Info("wheel delta %d: %s", static_cast<int>(GET_WHEEL_DELTA_WPARAM(wParam)),
+			           ours ? "used" : open ? "panel open but its tab bar is not known: passed on" : "panel closed: passed on");
 		}
 		if (ours) {
 			const int steps = g_wheel.Feed(GET_WHEEL_DELTA_WPARAM(wParam));
@@ -113,11 +196,9 @@ auto CALLBACK WheelWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) ->
 				g_pendingSteps += steps;
 			}
 			++g_wheelUsed;
-			// Not consumed yet: nothing switches the Act until the native previous/next is wired in.
-		} else {
-			g_wheel.Reset();
+			return 0;  // consumed: the game does not also act on this notch
 		}
-		return prev != nullptr ? CallWindowProcW(prev, hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+		g_wheel.Reset();
 	}
 	return prev != nullptr ? CallWindowProcW(prev, hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -185,34 +266,10 @@ void EnsureSubclass() noexcept {
 	g_hwnd = state.best;
 	char cls[64] = {};
 	GetClassNameA(state.best, cls, sizeof(cls));
-	int w = 0, h = 0;
-	ClientSize(state.best, &w, &h);
-	plog::Info("wheel: subclassed window %p (class %s, client %d x %d, %s)", static_cast<void*>(state.best), cls, w, h,
-	           unicode ? "unicode" : "ansi");
+	plog::Info("wheel: subclassed window %p (class %s, %s)", static_cast<void*>(state.best), cls, unicode ? "unicode" : "ansi");
 }
 
-// --- Switching (UI tick) --------------------------------------------------------------------------------------------
-
-// Moves the waypoint panel's tab bar by `steps` tabs (+ next, - previous). Placeholder: the native previous/next of
-// the TabBarWidget is not wired in yet, so this only follows and logs what it would do.
-void SwitchActs(int steps) noexcept {
-	const int count = TabCount(static_cast<Variant>(g_variant.load()));
-	const int from = g_shownAct.load();
-	const int to = wp::WrapAct(from, steps, count);
-	static std::atomic<uint32_t> s_logged{0};
-	if (plog::Sample(s_logged)) {
-		plog::Info("would switch Act %d -> %d (native tab previous/next not wired in yet)", from + 1, to + 1);
-	}
-}
-
-void ApplyPendingSteps() noexcept {
-	const int steps = g_pendingSteps.exchange(0);
-	if (steps != 0 && g_open.load()) {
-		SwitchActs(steps);
-	}
-}
-
-// --- UI tick ---------------------------------------------------------------------------------------------------------
+// --- UI tick -----------------------------------------------------------------------------------------------------------
 
 void __cdecl Tick(const D2RL::PluginContext* context, void* userData) noexcept;
 
@@ -231,8 +288,7 @@ auto QueueTick() noexcept -> bool {
 }
 
 // Starts the per-frame tick unless it runs already. D2RLoader refuses runOnUiThread while the plugin is still loading
-// (OwnerInactive, seen with D2RLoader 1.3.1), so this is called from every later callback (UI messages, gameplay
-// events) until it succeeds.
+// (OwnerInactive, seen with D2RLoader 1.3.1), so this is called from every later UI message until it succeeds.
 void StartTick() noexcept {
 	if (!g_active.load() || g_tickRunning.exchange(true)) {
 		return;
@@ -249,33 +305,35 @@ void __cdecl Tick(const D2RL::PluginContext* context, void* userData) noexcept {
 		g_tickRunning = false;
 		return;
 	}
-	++g_ticks;
 	EnsureSubclass();
 	ApplyPendingSteps();
 	(void)QueueTick();  // runs again on the next UI update
 }
 
-// --- Listeners -------------------------------------------------------------------------------------------------------
+// --- Listener ----------------------------------------------------------------------------------------------------------
 
 void SetOpen(bool open, Variant variant) noexcept {
 	if (open == g_open.load() && (!open || variant == static_cast<Variant>(g_variant.load()))) {
 		return;
 	}
+	g_pendingSteps = 0;
 	if (open) {
 		g_variant = static_cast<int>(variant);
-		const int count = TabCount(variant);
-		const int act = g_playerAct.load();
-		g_shownAct = act >= 0 && act < count ? act : 0;
-		g_pendingSteps = 0;
 		++g_opens;
 		g_open = true;
-		plog::Info("waypoint panel open: %s, Act %d shown", VariantName(variant), g_shownAct.load() + 1);
+		plog::Info("waypoint panel open: %s", VariantName(variant));
 	} else {
 		g_open = false;
-		g_pendingSteps = 0;
 		plog::Info("waypoint panel closed");
 	}
 	LogStatus(open ? "panel opened" : "panel closed");
+}
+
+// Panels are being destroyed: the tab bar pointer must not outlive them.
+void ForgetTabBar(const char* why) noexcept {
+	if (g_tabBar.exchange(nullptr) != nullptr) {
+		plog::Info("waypoint tab bar dropped (%s)", why);
+	}
 }
 
 auto __cdecl OnUiMessage(const D2RL::PluginContext* context, const D2RL::SharedEvents::UiMessageEvent* event, void* userData) noexcept
@@ -291,11 +349,10 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext* context, const D2RL::SharedE
 	const char* command = event->command != nullptr ? event->command : "";
 	const char* text = event->text != nullptr ? event->text : "";
 
-	// Diagnosis: messages naming waypoints, and every message while the panel is open.
-	const bool mentionsWaypoint = wp::Contains(target, "waypoint") || wp::Contains(text, "waypoint");
-	if ((mentionsWaypoint || g_open.load()) && g_loggedMessages.load() < MaxLoggedMessages) {
-		const uint32_t n = ++g_loggedMessages;
-		plog::Info("ui message %s:%s:%s%s", target, command, text, n == MaxLoggedMessages ? " (last one logged)" : "");
+	// Diagnosis: messages naming waypoints (not the input stream, which floods the log while the panel is open).
+	if ((wp::Contains(target, "waypoint") || wp::Contains(text, "waypoint")) && g_loggedMessages.load() < MaxLoggedMessages) {
+		++g_loggedMessages;
+		plog::Info("ui message %s:%s:%s", target, command, text);
 	}
 
 	if (std::strcmp(target, "PanelManager") == 0) {
@@ -303,33 +360,23 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext* context, const D2RL::SharedE
 			const Variant variant = wp::Contains(text, "original") ? Variant::Original : Variant::Expansion;
 			if (std::strcmp(command, "OpenPanel") == 0 || std::strcmp(command, "OpenExclusivePanel") == 0) {
 				SetOpen(true, variant);
-			} else if (std::strcmp(command, "ClosePanel") == 0 || std::strcmp(command, "UnloadPanel") == 0) {
+			} else if (std::strcmp(command, "ClosePanel") == 0) {
 				SetOpen(false, variant);
+			} else if (std::strcmp(command, "UnloadPanel") == 0) {
+				SetOpen(false, variant);
+				ForgetTabBar("panel unloaded");
 			}
 		} else if (std::strcmp(command, "UnloadAll") == 0) {
 			SetOpen(false, Variant::None);
+			ForgetTabBar("all panels unloaded");
 		}
 	} else if (std::strcmp(target, "FrontEndNavigation") == 0) {
 		SetOpen(false, Variant::None);
+		ForgetTabBar("left the game");
 	} else if (std::strcmp(target, "Waypoints") == 0 && std::strcmp(command, "SelectTab") == 0) {
 		++g_tabMessages;
 	}
 	return Continue;
-}
-
-void __cdecl OnGameplayEvent(const D2RL::PluginContext* context, const D2RL::Lifecycle::GameplayEvent* event, void* userData) noexcept {
-	(void)context;
-	(void)userData;
-	if (event == nullptr || !D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) {
-		return;
-	}
-	StartTick();
-	if (event->kind == D2RL::Lifecycle::GameplayEventKind::ActChanged) {
-		g_playerAct = event->currentValue;
-	} else if (event->kind == D2RL::Lifecycle::GameplayEventKind::GameLeft) {
-		g_playerAct = -1;
-		SetOpen(false, Variant::None);
-	}
 }
 
 template <typename Service>
@@ -337,15 +384,38 @@ auto Query(const D2RL::PluginContext* context, const Service** service, bool (*h
 	return context->QueryService(service) == D2RL::ServiceQueryResult::Success && has(*service, size);
 }
 
+// Hooks SetActiveTab and binds FindAvailableTab, on the expected image only. False (and why) otherwise.
+auto InstallEngine(const D2RL::PluginContext* context, char* why, size_t size) noexcept -> bool {
+	const uint32_t stamp = build_guard::ImageStamp(context->exeBase);
+	if (!build_guard::Matches(stamp)) {
+		std::snprintf(why, size, "game image 0x%08x is not 0x%08x (D2R 3.3 build 93847): addresses unknown", stamp, build_guard::ExpectedImage);
+		return false;
+	}
+	const auto* find = reinterpret_cast<const uint8_t*>(context->exeBase + FindAvailableTabRva);
+	if (std::memcmp(find, FindAvailableTabEntry, sizeof(FindAvailableTabEntry)) != 0) {
+		std::snprintf(why, size, "FindAvailableTab 0x%llx entry bytes differ", static_cast<unsigned long long>(FindAvailableTabRva));
+		return false;
+	}
+	const auto* set = reinterpret_cast<const uint8_t*>(context->exeBase + SetActiveTabRva);
+	if (set[0] == 0xff && set[1] == 0x25) {
+		std::snprintf(why, size, "SetActiveTab 0x%llx is already hooked by something else", static_cast<unsigned long long>(SetActiveTabRva));
+		return false;
+	}
+	g_findAvailableTab = reinterpret_cast<FindAvailableTabFn>(context->exeBase + FindAvailableTabRva);
+	g_panelCallSite = static_cast<uintptr_t>(context->exeBase + PanelSetActiveTabReturnRva);
+	if (!context->InstallInlineHook(SetActiveTabRva, SetActiveTabEntry, sizeof(SetActiveTabEntry), reinterpret_cast<void*>(&SetActiveTabHook),
+	                                reinterpret_cast<void**>(&g_setActiveTab)) ||
+	    g_setActiveTab == nullptr) {
+		std::snprintf(why, size, "hook on SetActiveTab 0x%llx refused (entry bytes differ)", static_cast<unsigned long long>(SetActiveTabRva));
+		return false;
+	}
+	return true;
+}
+
 }  // namespace
 
 auto InstallScrollableWaypoints(const D2RL::PluginContext* context, char* report, size_t reportSize) noexcept -> bool {
 	const D2RL::SharedEventService* events = nullptr;
-	const D2RL::LifecycleService* lifecycle = nullptr;
-	if (!Query(context, &g_widgets, D2RL::HasWidgetServiceField, D2RL::WidgetServiceRequiredSize)) {
-		std::snprintf(report, reportSize, "off: D2RLoader has no widget service");
-		return false;
-	}
 	if (!Query(context, &g_threads, D2RL::HasThreadServiceField, D2RL::ThreadServiceRequiredSize)) {
 		std::snprintf(report, reportSize, "off: D2RLoader has no thread service");
 		return false;
@@ -354,11 +424,13 @@ auto InstallScrollableWaypoints(const D2RL::PluginContext* context, char* report
 		std::snprintf(report, reportSize, "off: D2RLoader has no shared-event service");
 		return false;
 	}
-	if (!Query(context, &lifecycle, D2RL::HasLifecycleServiceField, D2RL::LifecycleServiceRequiredSize)) {
-		std::snprintf(report, reportSize, "off: D2RLoader has no lifecycle service");
-		return false;
-	}
 	g_ctx = context;
+	char why[200] = "";
+	g_engineOk = InstallEngine(context, why, sizeof(why));
+	if (!g_engineOk) {
+		// Nothing native is touched; the plugin only watches, and the wheel always goes to the game.
+		plog::Warn("Act switching off: %s", why);
+	}
 
 	const D2RL::SharedEvents::UiMessageListener messages{
 		.structSize = D2RL::SharedEvents::UiMessageListenerSize,
@@ -373,45 +445,28 @@ auto InstallScrollableWaypoints(const D2RL::PluginContext* context, char* report
 		std::snprintf(report, reportSize, "off: UI message listener refused");
 		return false;
 	}
-	for (const auto kind : {D2RL::Lifecycle::GameplayEventKind::ActChanged, D2RL::Lifecycle::GameplayEventKind::GameLeft,
-	                        D2RL::Lifecycle::GameplayEventKind::GameJoined, D2RL::Lifecycle::GameplayEventKind::LocalPlayerReady}) {
-		const D2RL::Lifecycle::GameplayEventListener listener{
-			.structSize = D2RL::Lifecycle::GameplayEventListenerSize,
-			.flags = 0,
-			.kind = kind,
-			.reserved = 0,
-			.callback = OnGameplayEvent,
-			.userData = nullptr,
-		};
-		D2RL::Lifecycle::ListenerHandle handle = D2RL::Lifecycle::InvalidHandle;
-		if (lifecycle->registerGameplayEventListener(context, &listener, &handle) != D2RL::Lifecycle::Result::Success) {
-			// Not fatal: without the player's Act the panel is assumed to open on Act I until a tab click says otherwise.
-			plog::Warn("gameplay listener %u refused: the Act shown on open is a guess", static_cast<unsigned>(kind));
-		}
-	}
 
 	g_active = true;
-	StartTick();  // refused while loading; the listeners start it on the first UI event
-	std::snprintf(report, reportSize, "on: wheel over the open waypoint panel switches Acts");
+	StartTick();  // refused while loading; the listener starts it on the first UI message
+	std::snprintf(report, reportSize, g_engineOk ? "on: the wheel switches Acts while the waypoint panel is open"
+	                                             : "watching only: Act switching off (see the warning above)");
 	return true;
 }
 
 void ScrollableWaypointsStatus(char* out, size_t size) noexcept {
-	const HWND hwnd = g_hwnd.load();
-	int w = 0, h = 0;
-	ClientSize(hwnd, &w, &h);
+	void* const tabBar = g_tabBar.load();
 	std::snprintf(out, size,
-	              "%s | window %s %d x %d | panel %s %s (opened %u) | Act shown %d, player %d | wheel %u seen, %u while open | "
-	              "tab messages %u",
-	              g_active.load() ? (g_tickRunning.load() ? "on" : "on, tick waiting for a UI event") : "off",
-	              hwnd != nullptr ? "hooked" : "not found yet", w, h, VariantName(static_cast<Variant>(g_variant.load())),
-	              g_open.load() ? "open" : "closed", g_opens.load(), g_shownAct.load() + 1, g_playerAct.load() + 1, g_wheelSeen.load(),
-	              g_wheelUsed.load(), g_tabMessages.load());
+	              "%s | window %s | panel %s %s (opened %u) | tab bar %s | wheel %u seen, %u used | switches %u | tab messages %u",
+	              g_active.load() ? (g_engineOk ? (g_tickRunning.load() ? "on" : "on, tick waiting for a UI event") : "watching only") : "off",
+	              g_hwnd.load() != nullptr ? "hooked" : "not found yet", VariantName(static_cast<Variant>(g_variant.load())),
+	              g_open.load() ? "open" : "closed", g_opens.load(), tabBar != nullptr ? "known" : "unknown", g_wheelSeen.load(),
+	              g_wheelUsed.load(), g_switches.load(), g_tabMessages.load());
 }
 
 void UninstallScrollableWaypoints() noexcept {
 	g_active = false;
 	g_open = false;
+	g_tabBar = nullptr;
 	const HWND hwnd = g_hwnd.load();
 	if (hwnd == nullptr || !IsWindow(hwnd)) {
 		return;

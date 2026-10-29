@@ -3,7 +3,8 @@
 // Target: D2R 3.3 under D2RLoader 1.3.1, PluginSDK 0.3.0. Client-only (UI behaviour, nothing shared with other
 // players), global (installed in <game>/d2rloader/plugins/, runs with or without a mod; not ModScopedOnly, which makes
 // D2RLoader refuse it in the global folder). It patches no game
-// code and uses no game address, so there is no image check: it uses SDK services and a window subclass only.
+// code except one checked hook on the tab bar's SetActiveTab (build 93847 only; on any other image it stays off and
+// only watches). See wp_scroll.cpp and ENGINE-NOTES.md.
 //
 // Console command "scrollable-waypoints" prints the live state (window, panel, Act, tab message, wheel counters).
 #include <D2RLPlugin/api.h>
@@ -28,7 +29,7 @@ constexpr D2RL::PluginInfo Info {
 	.version     = "0.1.3",
 	.author      = "d2r-modkit",
 	.description = "Mouse wheel over the waypoint panel switches between Act tabs.",
-	.flags       = D2RL::PluginFlags::Client,
+	.flags       = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
 };
 
 auto StatusCommand(D2R::Game::Client* client, const D2RL::ConsoleCommandContext* command, void* userData) noexcept
