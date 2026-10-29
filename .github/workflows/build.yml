@@ -1,9 +1,13 @@
 # Builds scrollable-waypoints.dll on Windows (MSVC, x64, Release) and uploads it as an artifact.
 # Download it from the run's page: Actions tab -> the run -> "Artifacts" -> scrollable-waypoints-dll.
+# A pushed tag v<version> (matching PluginVersion in plugin/src/plugin.cpp) also publishes a GitHub Release with the
+# DLL, its SHA-256 and that version's CHANGELOG.md section.
 name: Build DLL
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -63,3 +67,38 @@ jobs:
           name: scrollable-waypoints-dll
           path: plugin/build/Release/scrollable-waypoints.dll
           if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [logic-tests, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the plugin version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(sed -n 's/.*PluginVersion = "\([^"]*\)".*/\1/p' plugin/src/plugin.cpp)
+          echo "tag $tag, plugin $version"
+          [ "$tag" = "$version" ] || { echo "::error::tag v$tag does not match PluginVersion $version"; exit 1; }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: scrollable-waypoints-dll
+          path: dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cd dist
+          sha256sum scrollable-waypoints.dll > scrollable-waypoints.dll.sha256
+          # this version's CHANGELOG section (from its heading to the next one)
+          awk -v v="## $version" '$0 == v {on=1; next} /^## / {on=0} on' ../CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::CHANGELOG.md has no '## $version' section"; exit 1; }
+          printf '\n**Install:** close the game, copy `scrollable-waypoints.dll` into `<game folder>\\d2rloader\\plugins\\`, start the game through D2RLoader. Requires D2R 3.3 under D2RLoader 1.3.1.\n' >> notes.md
+          gh release create "$GITHUB_REF_NAME" scrollable-waypoints.dll scrollable-waypoints.dll.sha256 \
+            --repo "$GITHUB_REPOSITORY" --title "Scrollable Waypoints $version" --notes-file notes.md

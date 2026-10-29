@@ -1,9 +1,0 @@
-{
-  "name": "ScrollableWaypoints",
-  "savepath": "ScrollableWaypoints/",
-  "title": "Scrollable Waypoints",
-  "version": "0.1.3",
-  "description": "Mouse wheel over the waypoint panel switches between Act tabs.",
-  "extendedSaves": false,
-  "plugins": ["plugin/build/Release/scrollable-waypoints.dll"]
-}

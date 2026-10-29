@@ -3,7 +3,7 @@
 // selects a destination. Everything else is left to the game.
 //
 // No pixel coordinates and no simulated input: the plugin does what a controller shoulder button does to the panel's
-// tab bar. Pieces (confirmed in game or in the build-93847 image, see knowledge.md):
+// tab bar. Pieces (confirmed in game or in the build-93847 image, see ENGINE-NOTES.md):
 //  - Wheel: the SDK has no mouse input, so the plugin subclasses D2R's window procedure (class OsWindow) and reads
 //    WM_MOUSEWHEEL. While the panel is open and its tab bar is known, a notch is consumed and becomes an Act step;
 //    every other wheel message goes to the game unchanged.
@@ -47,8 +47,6 @@
 
 namespace {
 
-constexpr uint32_t MaxLoggedMessages = 60;  // UI-message diagnosis lines per load (the log must stay readable)
-constexpr uint32_t MaxLoggedWheel = 10;     // wheel events logged one by one (then only the counters)
 
 // --- Engine (D2R 3.3 build 93847, image 0x6ab3782c) ------------------------------------------------------------------
 
@@ -87,6 +85,7 @@ std::atomic<bool> g_open{false};      // waypoint panel open (UI messages)
 std::atomic<int> g_variant{0};        // Variant of the open panel
 std::atomic<int> g_pendingSteps{0};   // Act steps from the wheel, applied by the next UI tick
 std::atomic<bool> g_tickRunning{false};
+bool g_tickStarted = false;          // the tick has run once (UI thread)
 
 // The waypoint panel's tab bar, taken by the SetActiveTab hook (UI thread; the window procedure reads whether it is
 // known). Used only while the panel is open; dropped when panels are unloaded.
@@ -101,7 +100,7 @@ wp::WheelAccumulator g_wheel;  // window-procedure thread only
 
 // Counters for the status command.
 std::atomic<uint32_t> g_wheelSeen{0}, g_wheelUsed{0}, g_switches{0}, g_tabMessages{0};
-std::atomic<uint32_t> g_loggedMessages{0}, g_opens{0}, g_loggedWheel{0};
+std::atomic<uint32_t> g_opens{0};
 
 auto VariantName(Variant v) noexcept -> const char* {
 	return v == Variant::Original ? "WaypointsPanelOriginal" : v == Variant::Expansion ? "WaypointsPanelExpansion" : "none";
@@ -110,12 +109,6 @@ auto VariantName(Variant v) noexcept -> const char* {
 template <typename T>
 auto Field(void* object, size_t offset) noexcept -> T& {
 	return *reinterpret_cast<T*>(static_cast<uint8_t*>(object) + offset);
-}
-
-void LogStatus(const char* why) noexcept {
-	char state[700];
-	ScrollableWaypointsStatus(state, sizeof(state));
-	plog::Info("status (%s): %s", why, state);
 }
 
 // --- SetActiveTab hook: finds the waypoint panel's tab bar -------------------------------------------------------------
@@ -185,11 +178,6 @@ auto CALLBACK WheelWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) ->
 		++g_wheelSeen;
 		const bool open = g_open.load();
 		const bool ours = open && g_engineOk && g_tabBar.load() != nullptr;
-		if (g_loggedWheel.load() < MaxLoggedWheel) {
-			++g_loggedWheel;
-			plog::Info("wheel delta %d: %s", static_cast<int>(GET_WHEEL_DELTA_WPARAM(wParam)),
-			           ours ? "used" : open ? "panel open but its tab bar is not known: passed on" : "panel closed: passed on");
-		}
 		if (ours) {
 			const int steps = g_wheel.Feed(GET_WHEEL_DELTA_WPARAM(wParam));
 			if (steps != 0) {
@@ -280,6 +268,9 @@ auto QueueTick() noexcept -> bool {
 		return true;
 	}
 	g_tickRunning = false;
+	if (r == D2RL::Threads::Result::OwnerInactive && !g_tickStarted) {
+		return false;  // expected while the plugin is still loading: the next UI message retries
+	}
 	static std::atomic<uint32_t> s_refused{0};
 	if (plog::Sample(s_refused)) {
 		plog::Info("UI tick not queued (result %u, %u so far); retried on the next UI event", static_cast<unsigned>(r), s_refused.load());
@@ -293,7 +284,8 @@ void StartTick() noexcept {
 	if (!g_active.load() || g_tickRunning.exchange(true)) {
 		return;
 	}
-	if (QueueTick()) {
+	if (QueueTick() && !g_tickStarted) {
+		g_tickStarted = true;
 		plog::Info("UI tick started");
 	}
 }
@@ -321,12 +313,9 @@ void SetOpen(bool open, Variant variant) noexcept {
 		g_variant = static_cast<int>(variant);
 		++g_opens;
 		g_open = true;
-		plog::Info("waypoint panel open: %s", VariantName(variant));
 	} else {
 		g_open = false;
-		plog::Info("waypoint panel closed");
 	}
-	LogStatus(open ? "panel opened" : "panel closed");
 }
 
 // Panels are being destroyed: the tab bar pointer must not outlive them.
@@ -348,12 +337,6 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext* context, const D2RL::SharedE
 	const char* target = event->target != nullptr ? event->target : "";
 	const char* command = event->command != nullptr ? event->command : "";
 	const char* text = event->text != nullptr ? event->text : "";
-
-	// Diagnosis: messages naming waypoints (not the input stream, which floods the log while the panel is open).
-	if ((wp::Contains(target, "waypoint") || wp::Contains(text, "waypoint")) && g_loggedMessages.load() < MaxLoggedMessages) {
-		++g_loggedMessages;
-		plog::Info("ui message %s:%s:%s", target, command, text);
-	}
 
 	if (std::strcmp(target, "PanelManager") == 0) {
 		if (wp::Contains(text, "waypointspanel")) {

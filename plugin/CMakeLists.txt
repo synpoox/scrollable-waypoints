@@ -1,18 +1,18 @@
 # scrollable-waypoints: mouse wheel over D2R's waypoint panel switches the displayed Act (D2RLoader plugin).
 #
-# Build:  powershell -ExecutionPolicy Bypass -File build.ps1 -Sdk <d2rAI-toolkit>\third_party\PluginSDK
-# Output: build/Release/scrollable-waypoints.dll -> <game>/d2rloader/plugins/
+# Build:  powershell -ExecutionPolicy Bypass -File build.ps1 -Sdk <PluginSDK checkout>
+# Output: build/Release/scrollable-waypoints.dll -> copy it to <game>/d2rloader/plugins/
 cmake_minimum_required(VERSION 3.29)
 project(scrollable_waypoints LANGUAGES CXX RC)
 
-set(MODKIT_SDK_DIR "" CACHE PATH "D2RLoader PluginSDK directory (d2rAI-toolkit/third_party/PluginSDK)")
-if(NOT MODKIT_SDK_DIR)
-	message(FATAL_ERROR "Pass -DMODKIT_SDK_DIR=<d2rAI-toolkit>/third_party/PluginSDK")
+set(D2RL_SDK_DIR "" CACHE PATH "D2RLoader PluginSDK directory (github.com/D2RLoader/PluginSDK at 717f727, SDK 0.3.0)")
+if(NOT D2RL_SDK_DIR)
+	message(FATAL_ERROR "Pass -DD2RL_SDK_DIR=<PluginSDK checkout>")
 endif()
 
 set(D2RLPLUGIN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-add_subdirectory(${MODKIT_SDK_DIR} PluginSDK EXCLUDE_FROM_ALL)
+add_subdirectory(${D2RL_SDK_DIR} PluginSDK EXCLUDE_FROM_ALL)
 
 add_library(scrollable_waypoints SHARED
 	src/plugin.cpp

@@ -1,6 +1,5 @@
 // Pure logic of scrollable-waypoints: no Windows, no SDK, so tests/wp_logic_test.cpp runs it on any machine.
 //
-//  - Act wrap: wheel down = next Act, wheel up = previous, both ends wrap (5 tabs, or 4 on a Classic character).
 //  - Wheel notches: WM_MOUSEWHEEL deltas (120 per notch; precision wheels send smaller pieces) -> Act steps.
 #pragma once
 
@@ -8,14 +7,8 @@
 
 namespace wp {
 
-constexpr int MaxActs = 5;
+constexpr int MaxActs = 5;  // tabs on the waypoint panel (4 on a Classic character)
 constexpr int WheelNotch = 120;  // WHEEL_DELTA
-
-// Act `act` (0-based) moved by `steps` (+ next, - previous), wrapping at both ends of `count` Acts.
-constexpr auto WrapAct(int act, int steps, int count = MaxActs) noexcept -> int {
-	const int n = (act + steps) % count;
-	return n < 0 ? n + count : n;
-}
 
 // Collects wheel deltas into whole notches. Feed() returns Act steps: wheel down (negative delta) = +1 per notch.
 struct WheelAccumulator {

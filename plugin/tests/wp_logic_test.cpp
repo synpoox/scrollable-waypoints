@@ -14,18 +14,6 @@ static int g_failed = 0;
 	} while (0)
 
 int main() {
-	// Wrap: I->II->III->IV->V->I and back; Classic panels wrap over 4.
-	CHECK(wp::WrapAct(0, 1) == 1);
-	CHECK(wp::WrapAct(4, 1) == 0);
-	CHECK(wp::WrapAct(0, -1) == 4);
-	CHECK(wp::WrapAct(2, 7) == 4);
-	CHECK(wp::WrapAct(2, -8) == 4);
-	CHECK(wp::WrapAct(3, 1, 4) == 0);
-	CHECK(wp::WrapAct(0, -1, 4) == 3);
-	int act = 0;
-	for (int i = 0; i < 5; ++i) act = wp::WrapAct(act, 1);
-	CHECK(act == 0);
-
 	// Wheel: down (negative) = next Act, up = previous; partial notches wait.
 	wp::WheelAccumulator wheel;
 	CHECK(wheel.Feed(-120) == 1);

@@ -1,12 +1,12 @@
 # Scrollable Waypoints — in-game tests
 
-Status: wheel and panel detection confirmed in game. Act switching through the tab bar's native previous/next is new
-and not yet run in game.
+Run this checklist before every release. 1.0.0 was verified in game by the author (D2R 3.3, D2RLoader 1.3.1,
+with Reimagined).
 
-Run the rows in order. After the session, send `scrollable-waypoints.log` from `<game>\d2rloader\logs\`.
+Run the rows in order. The plugin log is in `<game>\d2rloader\logs\`.
 
 Setup: close the game, copy `scrollable-waypoints.dll` into `<game>\d2rloader\plugins\`, then start D2R through
-D2RLoader. 
+D2RLoader.
 
 | # | What | How | Expected | If not |
 |---|------|-----|----------|--------|
