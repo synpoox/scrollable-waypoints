@@ -10,18 +10,20 @@
 //  - Panel open/closed: UI messages PanelManager:OpenPanel / ClosePanel / UnloadPanel with WaypointsPanelExpansion
 //    (5 Acts) or WaypointsPanelOriginal (Classic characters, 4 Acts); PanelManager:UnloadAll, front-end navigation.
 //  - The panel's tab bar: a TabBarWidget ("Tabs", kept at WaypointsPanel+0x170). When the panel shows an Act
-//    (0x1ec820, on every open) it marks which Acts are available and calls TabBarWidget::SetActiveTab from one place
-//    (returning to 0x1ec8d3). A hook on SetActiveTab takes the tab bar of that call: only the waypoint panel makes it.
+//    (0x1ec820 in build 93847, on every open) it marks which Acts are available and calls TabBarWidget::SetActiveTab
+//    from one place (returning to 0x1ec8d3). A hook on SetActiveTab takes the tab bar of that call: only the waypoint panel makes it.
 //    It is dropped when panels are unloaded and only used while the panel is open.
-//  - Switching: the tab bar's own controller code (its input handler at 0x878ed3): previous = current - 1 (from the
+//  - Switching: the tab bar's own controller code (its input handler, 0x878ed3 in build 93847): previous = current - 1 (from the
 //    first tab: the last), next = current + 1 (from the last: the first), then FindAvailableTab skips tabs that are
 //    not available (Acts not reached yet), then SetActiveTab(index, sound on) selects it and sends the message, so the
 //    panel shows that Act exactly as after a click or a shoulder button.
-//  - Engine addresses are build 93847 only (image 0x6ab3782c); entry bytes are checked. On any other image the
-//    hook is not installed, nothing native is called and the wheel is never consumed.
+//  - Finding the code: no fixed addresses and no version check. At load the plugin searches the game's code for the
+//    three places by byte signature (worked out on D2R 3.3.0 build 93847, image 0x6ab3782c, with D2RLoader 1.3.1)
+//    and reads the field offsets out of the code it found, so any build whose tab bar code is unchanged works. If a
+//    signature is missing or not unique, or the pieces disagree, it hooks and calls nothing, logs why, and the wheel
+//    always goes to the game.
 #include "wp_scroll.h"
 
-#include "build_guard.h"
 #include "log.h"
 #include "wp_logic.h"
 
@@ -48,29 +50,39 @@
 namespace {
 
 
-// --- Engine (D2R 3.3 build 93847, image 0x6ab3782c) ------------------------------------------------------------------
+// --- Engine: found by signature (values in comments are build 93847's) ----------------------------------------------
 
-// void TabBarWidget::SetActiveTab(this, int index, bool playSound): sets the tab (re-checking availability), plays the
-// tab sound when asked, sends onSwitchTabMessage.
-constexpr uint64_t SetActiveTabRva = 0x878fb0;
-// MOV [RSP+0x18],RBX / MOV [RSP+0x10],EDX / PUSH RBP / PUSH RSI / PUSH RDI / SUB RSP,0x30: 16 bytes, 6 instructions.
-constexpr uint8_t SetActiveTabEntry[] = {0x48, 0x89, 0x5c, 0x24, 0x18, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x57, 0x48, 0x83, 0xec, 0x30};
-// int TabBarWidget::FindAvailableTab(this, int index, bool forward): `index` if available, else the nearest available
-// tab in that direction (wrapping).
-constexpr uint64_t FindAvailableTabRva = 0x877d20;
-constexpr uint8_t FindAvailableTabEntry[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x4c, 0x63, 0xda, 0x48, 0x8b, 0xd9,
-                                             0x41, 0x80, 0xbc, 0x0b, 0x88, 0x17, 0x00, 0x00, 0x00};
-// Return address of WaypointsPanel's own SetActiveTab call (in its show-Act routine 0x1ec820).
-constexpr uint64_t PanelSetActiveTabReturnRva = 0x1ec8d3;
-// TabBarWidget fields (reflection table at 0x2536000).
-constexpr size_t TabCountOffset = 0x558;          // int tabCount
-constexpr size_t ActiveTabOffset = 0x16c4;        // int active tab, -1 none
+// void TabBarWidget::SetActiveTab(this, int index, bool playSound) (0x878fb0): sets the tab (re-checking availability),
+// plays the tab sound when asked, sends onSwitchTabMessage. Entry: MOV [RSP+0x18],RBX / MOV [RSP+0x10],EDX / PUSH RBP /
+// PUSH RSI / PUSH RDI / SUB RSP,0x30 (16 bytes, hooked), then LEA RDI,[RCX+activeTab] and CMP EDX,[RCX+tabCount].
+constexpr const char* SetActiveTabSig =
+	"48 89 5C 24 18 89 54 24 10 55 56 57 48 83 EC 30 48 8D B9 ?? ?? ?? ?? 41 0F B6 F0 8B 2F 48 8B D9 "
+	"83 FA FF 75 06 8B CA 89 17 EB ?? 85 D2 78 08 3B 91 ?? ?? ?? ??";
+constexpr size_t SetActiveTabEntrySize = 16;
+constexpr size_t SetActiveTabActiveField = 0x13;  // disp32 of LEA RDI,[RCX+activeTab] (0x16c4)
+constexpr size_t SetActiveTabCountField = 0x31;   // disp32 of CMP EDX,[RCX+tabCount] (0x558)
+
+// int TabBarWidget::FindAvailableTab(this, int index, bool forward) (0x877d20): `index` if available, else the nearest
+// available tab in that direction (wrapping). Reads the availability bytes (0x1788) and tabCount (0x558).
+constexpr const char* FindAvailableTabSig = "48 89 5C 24 08 4C 63 DA 48 8B D9 41 80 BC 0B ?? ?? ?? ?? 00 75 ?? 44 8B 91 ?? ?? ?? ??";
+constexpr size_t FindAvailableTabCountField = 0x19;
+
+// WaypointsPanel's show-Act routine (0x1ec820): marks each Act's tab available or not, clamps the Act to the tab count
+// and calls SetActiveTab. The signature ends with that CALL; its return address (0x1ec8d3) identifies the waypoint tab
+// bar, and its target must be the SetActiveTab found above.
+constexpr const char* PanelCallSiteSig =
+	"48 8B 8D ?? ?? ?? ?? 41 BF 01 00 00 00 41 8B FF 44 39 B9 ?? ?? ?? ?? 7E ?? 48 8D B5 ?? ?? ?? ?? 8B 1E 45 32 F6 "
+	"E8 ?? ?? ?? ?? 45 33 C0 8B D3 48 8B C8 E8 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? 85 C0 45 0F B6 C6 8B D7 45 0F 45 C7 "
+	"E8 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? 48 8D 76 04 FF C7 3B B9 ?? ?? ?? ?? 7C ?? 8B 81 ?? ?? ?? ?? FF C8 41 3B C5 "
+	"44 0F 4C E8 45 33 C0 41 8B D5 E8 ?? ?? ?? ??";
 
 using SetActiveTabFn = void (*)(void* tabBar, int32_t index, bool playSound) noexcept;
 using FindAvailableTabFn = int32_t (*)(void* tabBar, int32_t index, bool forward) noexcept;
 
 SetActiveTabFn g_setActiveTab = nullptr;  // trampoline to the original (set by the hook)
 FindAvailableTabFn g_findAvailableTab = nullptr;
+size_t g_tabCountOffset = 0;              // TabBarWidget fields, read from the code found
+size_t g_activeTabOffset = 0;
 bool g_engineOk = false;
 
 // --- State -----------------------------------------------------------------------------------------------------------
@@ -90,7 +102,7 @@ bool g_tickStarted = false;          // the tick has run once (UI thread)
 // The waypoint panel's tab bar, taken by the SetActiveTab hook (UI thread; the window procedure reads whether it is
 // known). Used only while the panel is open; dropped when panels are unloaded.
 std::atomic<void*> g_tabBar{nullptr};
-uintptr_t g_panelCallSite = 0;        // exeBase + PanelSetActiveTabReturnRva
+uintptr_t g_panelCallSite = 0;        // return address of the panel's SetActiveTab call
 
 // Window subclass. g_hwnd is set by the UI tick; the window procedure reads g_prevProc.
 std::atomic<HWND> g_hwnd{nullptr};
@@ -120,13 +132,13 @@ void SetActiveTabHook(void* tabBar, int32_t index, bool playSound) noexcept {
 		return;
 	}
 	// The waypoint panel just showed an Act: this is its tab bar.
-	const int count = Field<int32_t>(tabBar, TabCountOffset);
+	const int count = Field<int32_t>(tabBar, g_tabCountOffset);
 	if (count < 1 || count > wp::MaxActs) {
 		plog::Warn("waypoint tab bar %p has %d tabs: not used", tabBar, count);
 		return;
 	}
 	if (g_tabBar.exchange(tabBar) != tabBar) {
-		plog::Info("waypoint tab bar %p (%d tabs, Act %d shown): scrolling on", tabBar, count, Field<int32_t>(tabBar, ActiveTabOffset) + 1);
+		plog::Info("waypoint tab bar %p (%d tabs, Act %d shown): scrolling on", tabBar, count, Field<int32_t>(tabBar, g_activeTabOffset) + 1);
 	}
 }
 
@@ -134,8 +146,8 @@ void SetActiveTabHook(void* tabBar, int32_t index, bool playSound) noexcept {
 
 // One controller-style step on the panel's tab bar: what its input handler does for tabLeft / tabRight.
 void StepTab(void* tabBar, bool forward) noexcept {
-	const int32_t count = Field<int32_t>(tabBar, TabCountOffset);
-	const int32_t current = Field<int32_t>(tabBar, ActiveTabOffset);
+	const int32_t count = Field<int32_t>(tabBar, g_tabCountOffset);
+	const int32_t current = Field<int32_t>(tabBar, g_activeTabOffset);
 	if (count < 1 || count > wp::MaxActs || current < -1 || current >= count) {
 		plog::Warn("tab bar %p looks wrong (%d tabs, active %d): scrolling off until the panel shows an Act again", tabBar, count, current);
 		g_tabBar = nullptr;
@@ -158,7 +170,7 @@ void ApplyPendingSteps() noexcept {
 	if (steps == 0 || !g_open.load() || tabBar == nullptr) {
 		return;
 	}
-	const int count = Field<int32_t>(tabBar, TabCountOffset);
+	const int count = Field<int32_t>(tabBar, g_tabCountOffset);
 	if (count > 0) {
 		steps %= count;  // a fast spin never goes round more than once
 	}
@@ -367,31 +379,102 @@ auto Query(const D2RL::PluginContext* context, const Service** service, bool (*h
 	return context->QueryService(service) == D2RL::ServiceQueryResult::Success && has(*service, size);
 }
 
-// Hooks SetActiveTab and binds FindAvailableTab, on the expected image only. False (and why) otherwise.
+// Executable sections of the game image, scanned for the signatures.
+struct CodeRange {
+	const uint8_t* start;
+	size_t size;
+};
+
+auto CodeRanges(uintptr_t exeBase, CodeRange* out, int max) noexcept -> int {
+	const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(exeBase);
+	if (exeBase == 0 || dos->e_magic != IMAGE_DOS_SIGNATURE) {
+		return 0;
+	}
+	const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(exeBase + static_cast<uintptr_t>(dos->e_lfanew));
+	if (nt->Signature != IMAGE_NT_SIGNATURE) {
+		return 0;
+	}
+	const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+	int n = 0;
+	for (WORD i = 0; i < nt->FileHeader.NumberOfSections && n < max; ++i, ++section) {
+		if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0 && section->Misc.VirtualSize > 0) {
+			out[n++] = {reinterpret_cast<const uint8_t*>(exeBase + section->VirtualAddress), section->Misc.VirtualSize};
+		}
+	}
+	return n;
+}
+
+// The one place `sig` matches in the game's code, or nullptr (and why) when it matches nowhere or more than once.
+auto FindUnique(const CodeRange* ranges, int count, const char* name, const char* sig, char* why, size_t size) noexcept -> const uint8_t* {
+	wp::Pattern pattern{};
+	if (!wp::ParsePattern(sig, &pattern)) {
+		std::snprintf(why, size, "bad signature for %s", name);
+		return nullptr;
+	}
+	const uint8_t* found = nullptr;
+	int matches = 0;
+	for (int i = 0; i < count && matches < 2; ++i) {
+		size_t at = 0;
+		const int n = wp::FindPattern(ranges[i].start, ranges[i].size, pattern, &at);
+		if (n > 0 && matches == 0) {
+			found = ranges[i].start + at;
+		}
+		matches += n;
+	}
+	if (matches != 1) {
+		std::snprintf(why, size, "%s %s in this game version's code", name, matches == 0 ? "not found" : "found more than once");
+		return nullptr;
+	}
+	return found;
+}
+
+// Finds the three places by signature, checks they agree, hooks SetActiveTab. False (and why) otherwise; then nothing
+// is hooked or called.
 auto InstallEngine(const D2RL::PluginContext* context, char* why, size_t size) noexcept -> bool {
-	const uint32_t stamp = build_guard::ImageStamp(context->exeBase);
-	if (!build_guard::Matches(stamp)) {
-		std::snprintf(why, size, "game image 0x%08x is not 0x%08x (D2R 3.3 build 93847): addresses unknown", stamp, build_guard::ExpectedImage);
+	CodeRange ranges[8];
+	const int count = CodeRanges(context->exeBase, ranges, 8);
+	if (count == 0) {
+		std::snprintf(why, size, "no code sections in the game image");
 		return false;
 	}
-	const auto* find = reinterpret_cast<const uint8_t*>(context->exeBase + FindAvailableTabRva);
-	if (std::memcmp(find, FindAvailableTabEntry, sizeof(FindAvailableTabEntry)) != 0) {
-		std::snprintf(why, size, "FindAvailableTab 0x%llx entry bytes differ", static_cast<unsigned long long>(FindAvailableTabRva));
+	const uint8_t* set = FindUnique(ranges, count, "TabBarWidget::SetActiveTab", SetActiveTabSig, why, size);
+	const uint8_t* find = set != nullptr ? FindUnique(ranges, count, "TabBarWidget::FindAvailableTab", FindAvailableTabSig, why, size) : nullptr;
+	const uint8_t* site = find != nullptr ? FindUnique(ranges, count, "the waypoint panel's tab call", PanelCallSiteSig, why, size) : nullptr;
+	if (site == nullptr) {
 		return false;
 	}
-	const auto* set = reinterpret_cast<const uint8_t*>(context->exeBase + SetActiveTabRva);
-	if (set[0] == 0xff && set[1] == 0x25) {
-		std::snprintf(why, size, "SetActiveTab 0x%llx is already hooked by something else", static_cast<unsigned long long>(SetActiveTabRva));
+	wp::Pattern sitePattern{};
+	(void)wp::ParsePattern(PanelCallSiteSig, &sitePattern);
+	const uint8_t* const returnAddress = site + sitePattern.size;  // the signature ends with CALL rel32
+	const uint8_t* const callTarget = returnAddress + wp::ReadI32(returnAddress - 4);
+	const uint32_t countOffset = wp::ReadU32(set + SetActiveTabCountField);
+	const uint32_t activeOffset = wp::ReadU32(set + SetActiveTabActiveField);
+	if (callTarget != set) {
+		std::snprintf(why, size, "the waypoint panel's tab call does not go to SetActiveTab");
 		return false;
 	}
-	g_findAvailableTab = reinterpret_cast<FindAvailableTabFn>(context->exeBase + FindAvailableTabRva);
-	g_panelCallSite = static_cast<uintptr_t>(context->exeBase + PanelSetActiveTabReturnRva);
-	if (!context->InstallInlineHook(SetActiveTabRva, SetActiveTabEntry, sizeof(SetActiveTabEntry), reinterpret_cast<void*>(&SetActiveTabHook),
+	if (wp::ReadU32(find + FindAvailableTabCountField) != countOffset || countOffset == 0 || countOffset >= 0x10000 ||
+	    activeOffset == 0 || activeOffset >= 0x10000 || activeOffset == countOffset) {
+		std::snprintf(why, size, "tab bar field offsets disagree (tabCount 0x%x, active 0x%x)", countOffset, activeOffset);
+		return false;
+	}
+	const uint64_t setRva = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(set) - context->exeBase);
+	g_tabCountOffset = countOffset;
+	g_activeTabOffset = activeOffset;
+	g_findAvailableTab = reinterpret_cast<FindAvailableTabFn>(const_cast<uint8_t*>(find));
+	g_panelCallSite = reinterpret_cast<uintptr_t>(returnAddress);
+	// The entry bytes (the signature's first 16) are copied: D2RLoader checks them again before patching.
+	uint8_t entry[SetActiveTabEntrySize];
+	std::memcpy(entry, set, sizeof(entry));
+	if (!context->InstallInlineHook(setRva, entry, sizeof(entry), reinterpret_cast<void*>(&SetActiveTabHook),
 	                                reinterpret_cast<void**>(&g_setActiveTab)) ||
 	    g_setActiveTab == nullptr) {
-		std::snprintf(why, size, "hook on SetActiveTab 0x%llx refused (entry bytes differ)", static_cast<unsigned long long>(SetActiveTabRva));
+		std::snprintf(why, size, "D2RLoader refused the hook on SetActiveTab (0x%llx)", static_cast<unsigned long long>(setRva));
 		return false;
 	}
+	plog::Info("found SetActiveTab 0x%llx, FindAvailableTab 0x%llx, panel call 0x%llx (tabCount +0x%x, active tab +0x%x)",
+	           static_cast<unsigned long long>(setRva), static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(find) - context->exeBase),
+	           static_cast<unsigned long long>(g_panelCallSite - context->exeBase), countOffset, activeOffset);
 	return true;
 }
 
@@ -412,7 +495,7 @@ auto InstallScrollableWaypoints(const D2RL::PluginContext* context, char* report
 	g_engineOk = InstallEngine(context, why, sizeof(why));
 	if (!g_engineOk) {
 		// Nothing native is touched; the plugin only watches, and the wheel always goes to the game.
-		plog::Warn("Act switching off: %s", why);
+		plog::Warn("Act switching unavailable: %s", why);
 	}
 
 	const D2RL::SharedEvents::UiMessageListener messages{
@@ -432,7 +515,7 @@ auto InstallScrollableWaypoints(const D2RL::PluginContext* context, char* report
 	g_active = true;
 	StartTick();  // refused while loading; the listener starts it on the first UI message
 	std::snprintf(report, reportSize, g_engineOk ? "on: the wheel switches Acts while the waypoint panel is open"
-	                                             : "watching only: Act switching off (see the warning above)");
+	                                             : "loaded, but Act switching is unavailable in this game version (see the warning above)");
 	return true;
 }
 
@@ -440,7 +523,7 @@ void ScrollableWaypointsStatus(char* out, size_t size) noexcept {
 	void* const tabBar = g_tabBar.load();
 	std::snprintf(out, size,
 	              "%s | window %s | panel %s %s (opened %u) | tab bar %s | wheel %u seen, %u used | switches %u | tab messages %u",
-	              g_active.load() ? (g_engineOk ? (g_tickRunning.load() ? "on" : "on, tick waiting for a UI event") : "watching only") : "off",
+	              g_active.load() ? (g_engineOk ? (g_tickRunning.load() ? "on" : "on, tick waiting for a UI event") : "Act switching unavailable") : "off",
 	              g_hwnd.load() != nullptr ? "hooked" : "not found yet", VariantName(static_cast<Variant>(g_variant.load())),
 	              g_open.load() ? "open" : "closed", g_opens.load(), tabBar != nullptr ? "known" : "unknown", g_wheelSeen.load(),
 	              g_wheelUsed.load(), g_switches.load(), g_tabMessages.load());
