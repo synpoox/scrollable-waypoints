@@ -44,7 +44,8 @@
 namespace {
 
 // Candidate root names of waypointspanelhd.json, first match wins (UNVERIFIED).
-constexpr const char* PanelNames[] = {"WaypointsPanel", "WaypointPanel", "WaypointsPanelHD", "Waypoints"};
+constexpr const char* PanelNames[] = {"WaypointsPanel", "WaypointPanel", "WaypointsPanelHD", "WaypointPanelHD", "Waypoints",
+                                      "WaypointsMenu", "WaypointMenu", "WaypointsPanelLayout", "waypointspanelhd"};
 constexpr int PanelNameCount = static_cast<int>(sizeof(PanelNames) / sizeof(PanelNames[0]));
 
 // Tab message until a real tab click teaches it, by analogy with SkillsTreePanelMessage:ActivateTab:<n> (UNVERIFIED).
@@ -52,6 +53,8 @@ constexpr const char* DefaultTabTarget = "WaypointsPanelMessage";
 constexpr const char* DefaultTabCommand = "ActivateTab";
 
 constexpr uint32_t MaxLoggedMessages = 300;  // UI-message diagnosis lines per load (the log must stay readable)
+constexpr uint32_t MaxLoggedWheel = 20;      // wheel events logged one by one (then only the counters)
+constexpr int MaxDistinctMessages = 512;     // distinct target:command pairs logged once each
 
 const D2RL::PluginContext* g_ctx = nullptr;
 const D2RL::WidgetService* g_widgets = nullptr;
@@ -83,9 +86,21 @@ bool g_tabLearned = false;
 
 // Counters for the status command.
 std::atomic<uint32_t> g_wheelSeen{0}, g_wheelUsed{0}, g_rawWheel{0}, g_switches{0}, g_switchFails{0}, g_tabClicks{0};
-std::atomic<uint32_t> g_loggedMessages{0}, g_opens{0};
+std::atomic<uint32_t> g_loggedMessages{0}, g_opens{0}, g_loggedWheel{0};
+
+// Diagnosis state (UI thread).
+uint32_t g_findResult[sizeof(PanelNames) / sizeof(PanelNames[0])];  // last findPanel result per name, logged on change
+uint64_t g_seenMessages[MaxDistinctMessages];
+int g_seenMessageCount = 0;
+uint64_t g_ticks = 0;
 
 // --- Window procedure ------------------------------------------------------------------------------------------------
+
+void LogStatus(const char* why) noexcept {
+	char state[700];
+	ScrollableWaypointsStatus(state, sizeof(state));
+	plog::Info("status (%s): %s", why, state);
+}
 
 // Cursor (client coordinates) over the waypoint panel: the left half of the client area (see the header comment).
 auto OverPanel(HWND hwnd, LPARAM lParam) noexcept -> bool {
@@ -112,7 +127,19 @@ auto CALLBACK WheelWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) ->
 	const WNDPROC prev = g_prevProc.load();
 	if (g_active.load() && msg == WM_MOUSEWHEEL) {
 		++g_wheelSeen;
-		if (g_open.load() && OverPanel(hwnd, lParam)) {
+		const bool open = g_open.load();
+		const bool over = open && OverPanel(hwnd, lParam);
+		if (g_loggedWheel.load() < MaxLoggedWheel) {
+			++g_loggedWheel;
+			plog::Info("wheel delta %d at screen %d,%d: panel %s%s", static_cast<int>(GET_WHEEL_DELTA_WPARAM(wParam)),
+			           static_cast<int>(GET_X_LPARAM(lParam)), static_cast<int>(GET_Y_LPARAM(lParam)), open ? "open" : "closed",
+			           open ? (over ? ", cursor over it: used" : ", cursor elsewhere: passed on") : ": passed on");
+		}
+		static std::atomic<uint32_t> s_seen{0};
+		if (plog::Sample(s_seen)) {
+			LogStatus("wheel");
+		}
+		if (over) {
 			const int steps = g_wheel.Feed(GET_WHEEL_DELTA_WPARAM(wParam));
 			if (steps != 0) {
 				g_pendingSteps += steps;
@@ -223,7 +250,12 @@ auto PanelResolves(D2RL::Widgets::Rect* rect) noexcept -> bool {
 	}
 	for (int i = 0; i < PanelNameCount; ++i) {
 		D2RL::Widgets::WidgetHandle handle = D2RL::Widgets::InvalidHandle;
-		if (g_widgets->findPanel(ctx, PanelNames[i], &handle) == D2RL::Widgets::Result::Success && handle != D2RL::Widgets::InvalidHandle) {
+		const D2RL::Widgets::Result found = g_widgets->findPanel(ctx, PanelNames[i], &handle);
+		if (static_cast<uint32_t>(found) != g_findResult[i]) {
+			g_findResult[i] = static_cast<uint32_t>(found);
+			plog::Info("findPanel(\"%s\") -> result %u", PanelNames[i], static_cast<unsigned>(found));  // 0 found, 4 not found
+		}
+		if (found == D2RL::Widgets::Result::Success && handle != D2RL::Widgets::InvalidHandle) {
 			g_panel = handle;
 			g_panelName = i;
 			plog::Info("waypoint panel found as \"%s\"", PanelNames[i]);
@@ -254,6 +286,7 @@ void PollPanel() noexcept {
 		plog::Info("waypoint panel closed");
 	}
 	g_open = open;
+	LogStatus(open ? "panel opened" : "panel closed");
 }
 
 void ApplyPendingSteps() noexcept {
@@ -303,7 +336,13 @@ void __cdecl Tick(const D2RL::PluginContext* context, void* userData) noexcept {
 		g_tickRunning = false;
 		return;
 	}
+	if (g_ticks++ == 0) {
+		plog::Info("UI tick running");
+	}
 	EnsureSubclass();
+	if (g_hwnd == nullptr && g_ticks == 600) {
+		plog::Warn("no game window found after 600 UI ticks: the wheel cannot be read");
+	}
 	PollPanel();
 	ApplyPendingSteps();
 	QueueTick();  // runs again on the next UI update
@@ -322,6 +361,17 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext* context, const D2RL::SharedE
 	const char* target = event->target != nullptr ? event->target : "";
 	const char* command = event->command != nullptr ? event->command : "";
 	const char* text = event->text != nullptr ? event->text : "";
+
+	// Diagnosis: each distinct target:command once (shows the real panel and tab message names).
+	const uint64_t key = event->targetHash * 31U ^ event->commandHash;
+	bool seen = false;
+	for (int i = 0; i < g_seenMessageCount && !seen; ++i) {
+		seen = g_seenMessages[i] == key;
+	}
+	if (!seen && g_seenMessageCount < MaxDistinctMessages) {
+		g_seenMessages[g_seenMessageCount++] = key;
+		plog::Info("ui first %s:%s:%s", target, command, text);
+	}
 
 	// Diagnosis: every message naming the waypoint panel, and every message while it is open.
 	const bool mentionsWaypoint = wp::Contains(target, "waypoint") || wp::Contains(command, "waypoint") || wp::Contains(text, "waypoint");
@@ -395,6 +445,9 @@ auto InstallScrollableWaypoints(const D2RL::PluginContext* context, char* report
 		return false;
 	}
 	g_ctx = context;
+	for (uint32_t& r : g_findResult) {
+		r = 0xffffffffU;  // "not tried yet": the first result of every name is logged
+	}
 	std::snprintf(g_tabTarget, sizeof(g_tabTarget), "%s", DefaultTabTarget);
 	std::snprintf(g_tabCommand, sizeof(g_tabCommand), "%s", DefaultTabCommand);
 

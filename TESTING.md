@@ -1,6 +1,6 @@
 # Scrollable Waypoints — in-game tests
 
-Build 0.1.1 has **not been run in the game yet**. It compiles against PluginSDK 0.3.0 and the logic tests pass;
+Status: 0.1.1 loads in the game (confirmed), but scrolling did nothing. 0.1.2 adds diagnostics to find out why;
 nothing below has been checked in D2R. Run the rows in order. After the session, send me the plugin log from
 `<game>\d2rloader\logs\` and the output of the `scrollable-waypoints` console command (rows 2 and 9).
 

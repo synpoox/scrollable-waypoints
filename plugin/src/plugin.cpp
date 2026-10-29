@@ -16,7 +16,7 @@
 namespace {
 
 constexpr const char* PluginName = "scrollable-waypoints";
-constexpr const char* PluginVersion = "0.1.1";
+constexpr const char* PluginVersion = "0.1.2";
 
 const D2RL::PluginContext* g_context = nullptr;
 
@@ -25,7 +25,7 @@ constexpr D2RL::PluginInfo Info {
 	.abiVersion  = D2RL_PLUGIN_ABI_VERSION,
 	.id          = "scrollable-waypoints",
 	.name        = "Scrollable Waypoints",
-	.version     = "0.1.1",
+	.version     = "0.1.2",
 	.author      = "d2r-modkit",
 	.description = "Mouse wheel over the waypoint panel switches between Act tabs.",
 	.flags       = D2RL::PluginFlags::Client,
