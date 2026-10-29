@@ -1,0 +1,48 @@
+# Builds scrollable-waypoints.dll on Windows (MSVC, x64, Release) and uploads it as an artifact.
+# Download it from the run's page: Actions tab -> the run -> "Artifacts" -> scrollable-waypoints-dll.
+name: Build DLL
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # D2RLoader PluginSDK 0.3.0 (D2RLoader 1.3.1): the SDK this plugin was written against.
+  PLUGIN_SDK_REF: 717f727a0ec52912d1558764345f8fa3453a2bd6
+
+jobs:
+  logic-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run logic tests
+        run: |
+          g++ -std=c++20 -Wall -Wextra -Iplugin/src plugin/tests/wp_logic_test.cpp -o wp_test
+          ./wp_test
+
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out D2RLoader PluginSDK
+        uses: actions/checkout@v4
+        with:
+          repository: D2RLoader/PluginSDK
+          ref: ${{ env.PLUGIN_SDK_REF }}
+          path: PluginSDK
+
+      - name: Build
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File plugin\build.ps1 -Sdk "$env:GITHUB_WORKSPACE\PluginSDK"
+
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrollable-waypoints-dll
+          path: plugin/build/Release/scrollable-waypoints.dll
+          if-no-files-found: error

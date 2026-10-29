@@ -10,6 +10,27 @@ That is all it adds. It has no keys or settings, never selects a destination and
 closed, or with the cursor elsewhere, the wheel goes to the game untouched. The panel's look, its tabs, its
 destinations and its clicks stay vanilla.
 
+## Download a build
+
+Every push builds the DLL on GitHub: open the **Actions** tab, click the newest green "Build DLL" run, and download
+**scrollable-waypoints-dll** under *Artifacts* (a zip with `scrollable-waypoints.dll` inside). Being signed in to
+GitHub is required to download artifacts.
+
+## Build it yourself on Windows
+
+1. Install [Visual Studio 2022 Community](https://visualstudio.microsoft.com/vs/community/) with the workload
+   **"Desktop development with C++"** (it includes CMake), and [Git](https://git-scm.com/download/win).
+2. Open **"Developer PowerShell for VS 2022"** from the Start menu.
+3. Run, one line at a time:
+   ```
+   cd $HOME\Documents
+   git clone https://github.com/synpoox/scrollable-waypoints.git
+   git clone https://github.com/D2RLoader/PluginSDK.git
+   git -C PluginSDK checkout 717f727a0ec52912d1558764345f8fa3453a2bd6
+   powershell -ExecutionPolicy Bypass -File scrollable-waypoints\plugin\build.ps1 -Sdk PluginSDK
+   ```
+4. The last line prints `built: ...\scrollable-waypoints.dll`: that is the plugin.
+
 ## Build and install
 
 ```
