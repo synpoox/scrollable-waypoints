@@ -17,11 +17,11 @@
 //    first tab: the last), next = current + 1 (from the last: the first), then FindAvailableTab skips tabs that are
 //    not available (Acts not reached yet), then SetActiveTab(index, sound on) selects it and sends the message, so the
 //    panel shows that Act exactly as after a click or a shoulder button.
-//  - Finding the code: no fixed addresses and no version check. At load the plugin searches the game's code for the
-//    three places by byte signature (worked out on D2R 3.3.0 build 93847, image 0x6ab3782c, with D2RLoader 1.3.1)
-//    and reads the field offsets out of the code it found, so any build whose tab bar code is unchanged works. If a
-//    signature is missing or not unique, or the pieces disagree, it hooks and calls nothing, logs why, and the wheel
-//    always goes to the game.
+//  - Finding the code: no fixed addresses and no version gate (build_guard.h only reports the image). At load the
+//    plugin searches the game's code for the three places by byte signature (worked out on D2R 3.3.0 build 93847,
+//    image 0x6ab3782c, with D2RLoader 1.3.1) and reads the field offsets out of the code it found, so any build whose
+//    tab bar code is unchanged works. If a signature is missing or not unique, or the pieces disagree, it hooks and
+//    calls nothing, logs why, and the wheel always goes to the game.
 #include "wp_scroll.h"
 
 #include "log.h"

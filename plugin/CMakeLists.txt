@@ -18,6 +18,7 @@ add_library(scrollable_waypoints SHARED
 	src/plugin.cpp
 	src/wp_scroll.cpp
 	src/log.cpp
+	src/env_guard.cpp
 	src/scrollable-waypoints.rc
 )
 target_link_libraries(scrollable_waypoints PRIVATE D2RLPlugin::D2RLPlugin user32)
