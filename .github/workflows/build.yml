@@ -44,6 +44,9 @@ jobs:
         # No game runs here: the script must parse, compile its C# and stop at "is not running".
         shell: pwsh
         run: |
+          # The script exits 1 by design here; keep that from stopping the step before the check.
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
           $out = (powershell -ExecutionPolicy Bypass -File tools\dump-game.ps1 -Out $env:RUNNER_TEMP 2>&1 | Out-String -Width 400)
           Write-Output $out
           if ($out -notmatch "is not running") {
