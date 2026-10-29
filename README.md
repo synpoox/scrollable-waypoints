@@ -33,13 +33,10 @@ GitHub is required to download artifacts.
 
 ## Build and install
 
-```
-powershell -ExecutionPolicy Bypass -File plugin\build.ps1 -Sdk <d2rAI-toolkit>\third_party\PluginSDK
-python -m modkit install <this folder>        (game closed)
-```
-
-The mod has no data changes (`patches/` is empty). It ships only `scrollable-waypoints.dll`, which goes in
-`mods\ScrollableWaypoints\d2rloader\plugins\`.
+With the game closed, copy `scrollable-waypoints.dll` into `<game>\d2rloader\plugins\` (D2RLoader's global plugin
+folder), then start D2R through D2RLoader. It works with or without a mod. It has no data changes. `mod.json` is
+there only so d2rAI-toolkit's `modkit install` can also ship it inside a mod
+(`<game>\mods\ScrollableWaypoints\d2rloader\plugins\`). Keep only one copy.
 
 Third-party code: see NOTICE.md.
 

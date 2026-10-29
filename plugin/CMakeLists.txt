@@ -1,7 +1,7 @@
 # scrollable-waypoints: mouse wheel over D2R's waypoint panel switches the displayed Act (D2RLoader plugin).
 #
 # Build:  powershell -ExecutionPolicy Bypass -File build.ps1 -Sdk <d2rAI-toolkit>\third_party\PluginSDK
-# Output: build/Release/scrollable-waypoints.dll -> <game>/mods/ScrollableWaypoints/d2rloader/plugins/ (modkit install does it)
+# Output: build/Release/scrollable-waypoints.dll -> <game>/d2rloader/plugins/
 cmake_minimum_required(VERSION 3.29)
 project(scrollable_waypoints LANGUAGES CXX RC)
 

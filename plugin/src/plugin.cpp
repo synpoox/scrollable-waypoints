@@ -1,7 +1,8 @@
 // scrollable-waypoints: D2RLoader plugin entry point.
 //
 // Target: D2R 3.3 under D2RLoader 1.3.1, PluginSDK 0.3.0. Client-only (UI behaviour, nothing shared with other
-// players), mod-scoped (loads only from <game>/mods/<Mod>/d2rloader/plugins/ while that mod runs). It patches no game
+// players), global (installed in <game>/d2rloader/plugins/, runs with or without a mod; not ModScopedOnly, which makes
+// D2RLoader refuse it in the global folder). It patches no game
 // code and uses no game address, so there is no image check: it uses SDK services and a window subclass only.
 //
 // Console command "scrollable-waypoints" prints the live state (window, panel, Act, tab message, wheel counters).
@@ -15,7 +16,7 @@
 namespace {
 
 constexpr const char* PluginName = "scrollable-waypoints";
-constexpr const char* PluginVersion = "0.1.0";
+constexpr const char* PluginVersion = "0.1.1";
 
 const D2RL::PluginContext* g_context = nullptr;
 
@@ -24,10 +25,10 @@ constexpr D2RL::PluginInfo Info {
 	.abiVersion  = D2RL_PLUGIN_ABI_VERSION,
 	.id          = "scrollable-waypoints",
 	.name        = "Scrollable Waypoints",
-	.version     = "0.1.0",
+	.version     = "0.1.1",
 	.author      = "d2r-modkit",
 	.description = "Mouse wheel over the waypoint panel switches between Act tabs.",
-	.flags       = D2RL::PluginFlags::Client | D2RL::PluginFlags::ModScopedOnly,
+	.flags       = D2RL::PluginFlags::Client,
 };
 
 auto StatusCommand(D2R::Game::Client* client, const D2RL::ConsoleCommandContext* command, void* userData) noexcept

@@ -1,11 +1,12 @@
 # Scrollable Waypoints — in-game tests
 
-Build 0.1.0 has **not been run in the game yet**. It compiles against PluginSDK 0.3.0 and the logic tests pass;
+Build 0.1.1 has **not been run in the game yet**. It compiles against PluginSDK 0.3.0 and the logic tests pass;
 nothing below has been checked in D2R. Run the rows in order. After the session, send me the plugin log from
-`<game>\mods\ScrollableWaypoints\d2rloader\logs\` and the output of the `scrollable-waypoints` console command (rows 2 and 9).
+`<game>\d2rloader\logs\` and the output of the `scrollable-waypoints` console command (rows 2 and 9).
 
-Setup: build (`plugin\build.ps1 -Sdk <d2rAI-toolkit>\third_party\PluginSDK`), close the game,
-`python -m modkit install <this folder>`, then start D2R through D2RLoader with the ScrollableWaypoints mod. Use a
+Setup: close the game, copy `scrollable-waypoints.dll` into `<game>\d2rloader\plugins\`, then start D2R through
+D2RLoader. The plugin card should say **Loaded** (0.1.0 showed "Errored" in the global folder because it was
+mod-scoped only). Use a
 character that has reached all five Acts.
 
 | # | What | How | Expected | If not |
