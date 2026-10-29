@@ -44,9 +44,13 @@ jobs:
         # No game runs here: the script must parse, compile its C# and stop at "is not running".
         shell: pwsh
         run: |
-          $out = powershell -ExecutionPolicy Bypass -File tools\dump-game.ps1 -Out $env:RUNNER_TEMP 2>&1 | Out-String
+          $out = (powershell -ExecutionPolicy Bypass -File tools\dump-game.ps1 -Out $env:RUNNER_TEMP 2>&1 | Out-String -Width 400)
           Write-Output $out
-          if ($out -notmatch "is not running") { throw "dump-game.ps1 did not reach its process check" }
+          if ($out -notmatch "is not running") {
+            $flat = ($out -replace "`r?`n", " | ")
+            Write-Output "::error title=dump-game.ps1::$flat"
+            exit 1
+          }
 
       - name: Upload DLL
         uses: actions/upload-artifact@v4
